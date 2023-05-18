@@ -3,7 +3,9 @@
 #include <string>
 #include <array>
 #include <cassert>
+#include <concepts>
 #include <stdexcept>
+#include <functional>
 #include <type_traits>
 
 #define DIRTY_MACRO_DECLARE_OPERATOR(op)                                                  \
@@ -13,19 +15,35 @@
 
 using myvar = std::variant<double, int, float>;
 
-template <class, size_t, size_t>
+namespace meta {
+
+  template <class T>
+  concept trivially_copyable = std::is_trivially_copyable<T>::value;
+
+  template <class T>
+  concept trivially_swappable = trivially_copyable<T> && std::default_initializable<T>;
+
+  template <class T>
+  struct identity {
+    using type = T;
+  };
+  template <class T>
+  using identity_t = identity<T>;
+
+  template <template <class...> class Container, class... Ts>
+  constexpr bool max_alignment_of(identity<Container<Ts...>>) {
+    return std::max({alignof(Ts)...});
+  }
+
+}
+
+template <meta::trivially_swappable, size_t, size_t>
 class variant_array;
 
 namespace detail {
 
-  // Assert that all given variant types are trivial.
-  template <template <class...> class Variant, class... Types>
-  constexpr bool all_trivial_types(Variant<Types...> const&) {
-    return (std::is_trivial_v<Types> && ...);
-  }
-
   // Base case, unimplemented.
-  template <class T>
+  template <class>
   struct variant_unpacker;
 
   // Partial specialization to be able to extract the variant's types
@@ -149,7 +167,7 @@ namespace detail {
       friend class variant_array<
         typename Container::value_type,
                  Container::max_items,
-                 Container::item_byte_size
+                 Container::storage_size
       >;
 
       // Idiomatic implementation of operator == as a free function found by ADL
@@ -188,21 +206,170 @@ namespace detail {
 
 #undef DIRTY_MACRO_DECLARE_OPERATOR
 
+  template <class T>
+  using aligned_storage_for_t = std::aligned_storage_t<sizeof(T), alignof(T)>;
+
+  template <class T, class Func>
+  constexpr auto with_aligned_stack_storage(Func&& callback)
+    noexcept(noexcept(std::forward<Func>(callback)(std::declval<aligned_storage_for_t<T>&>())))
+  {
+    aligned_storage_for_t<T> tmp;
+    return std::forward<Func>(callback)(tmp);
+  }
+
+  // FIXME: Doing the noexcept generically here sucks. Don't throw
+  template <class T, class Func>
+  constexpr auto unpack_misaligned_type(uint8_t const* data, Func&& callback)
+    noexcept(noexcept(std::forward<Func>(callback)(std::declval<T&>())))
+  {
+    return with_aligned_stack_storage<T>([&] (auto& storage) {
+      T* tmp = new(&storage) T();
+      memcpy(tmp, data, sizeof(T));
+      return std::forward<Func>(callback)(*tmp);
+    });
+  }
+
+  template <class Variant, class T, class... Ts, class Func, size_t idx, size_t... idxs>
+  constexpr Variant unpack_if_misaligned_impl(uint8_t type_index,
+      uint8_t const* data, Func&& callback, std::index_sequence<idx, idxs...>)
+    noexcept((noexcept(std::forward<Func>(callback)(std::declval<Ts&>())) && ...))
+  {
+    if (idx == type_index) {
+      if (reinterpret_cast<std::uintptr_t>(data) & (alignof(T) - 1)) {
+        // Pointer is misaligned, fix it up
+        return unpack_misaligned_type<T>(data, std::forward<Func>(callback));
+      } else {
+        return std::forward<Func>(callback)(*std::launder(reinterpret_cast<T const*>(data)));
+      }
+    }
+
+    if constexpr (sizeof...(Ts)) {
+      return unpack_if_misaligned_impl<Variant, Ts...>(type_index,
+          data, std::forward<Func>(callback), std::index_sequence<idxs...> {});
+    } else {
+      __builtin_unreachable();
+    }
+  }
+
+  template <class Variant, class... Ts, class Func>
+  constexpr Variant unpack_if_misaligned(uint8_t type_index, uint8_t const* data, Func&& callback)
+    noexcept((noexcept(std::forward<Func>(callback)(std::declval<Ts&>())) && ...))
+  {
+    return unpack_if_misaligned_impl<Variant, Ts...>(type_index, data, std::forward<Func>(callback), std::index_sequence_for<Ts...> {});
+  }
+
+  template <template <class...> class Variant, class... Types, class Func>
+  constexpr auto variant_unpack(uint8_t type_index, uint8_t const* data, meta::identity<Variant<Types...>>, Func&& callback)
+    noexcept((noexcept(std::forward<Func>(callback)(std::declval<Types&>())) && ...))
+  {
+    return unpack_if_misaligned<Variant<Types...>, Types...>(type_index, data, std::forward<Func>(callback));
+  }
+
+  template <class Variant, size_t MaxItems, size_t StorageSize>
+  struct trivial_variant_base {
+    using offset_array = std::array<uint16_t, MaxItems>;
+    using storage_type = std::aligned_storage_t<
+      StorageSize,
+      max_alignment_of(meta::identity<Variant> {})
+    >;
+
+    uint8_t operator [](size_t offset) const noexcept {
+      return *(reinterpret_cast<uint8_t const*>(&data) + offset);
+    }
+
+    uint8_t* get_data() noexcept {
+      return reinterpret_cast<uint8_t*>(&data);
+    }
+
+    uint8_t const* get_data() const noexcept {
+      return reinterpret_cast<uint8_t const*>(&data);
+    }
+
+    void incr_offset(size_t bytes) noexcept {
+      offset += bytes;
+    }
+
+    void decr_offset(size_t bytes) noexcept {
+      offset -= bytes;
+    }
+
+    uint8_t type_index_for(size_t offset) const noexcept {
+      return (*this)[offset];
+    }
+
+    uint16_t count = 0;
+    uint16_t offset = 0;
+    offset_array offsets {0};
+    storage_type data {0};
+  };
+
+  template <class Variant, size_t MaxItems, size_t StorageSize>
+  struct destructible_variant_base {
+    using offset_array = std::array<uint16_t, MaxItems>;
+    using storage_type = std::aligned_storage_t<
+      StorageSize,
+      max_alignment_of(meta::identity<Variant> {})
+    >;
+
+    ~destructible_variant_base() noexcept {
+      while (count) {
+        auto const curr_offset = offsets[--count];
+        auto const type_index = static_cast<uint8_t>(data[curr_offset]);
+        auto* const curr_data = &data[curr_offset + sizeof(type_index)];
+        variant_unpack(type_index, curr_data, meta::identity<Variant> {}, [&] (auto& value) {
+          using curr_type = std::decay_t<decltype(value)>;
+          value.~curr_type();
+        });
+      }
+    }
+
+    uint8_t operator [](size_t offset) const noexcept {
+      return *(reinterpret_cast<uint8_t const*>(&data) + offset);
+    }
+
+    uint8_t* get_data() noexcept {
+      return reinterpret_cast<uint8_t*>(&data);
+    }
+
+    uint8_t const* get_data() const noexcept {
+      return reinterpret_cast<uint8_t const*>(&data);
+    }
+
+    void incr_offset(size_t bytes) noexcept {
+      offset += bytes;
+    }
+
+    void decr_offset(size_t bytes) noexcept {
+      offset -= bytes;
+    }
+
+    uint8_t type_index_for(size_t offset) const {
+      return static_cast<uint8_t>(data[offset]);
+    }
+
+    uint16_t count = 0;
+    uint16_t offset = 0;
+    offset_array offsets {0};
+    storage_type data {0};
+  };
+
+  template <class Variant, size_t MaxItems, size_t StorageSize>
+  struct autotrivial_variant_base : std::conditional_t<
+    std::is_trivially_destructible_v<Variant>,
+    trivial_variant_base<Variant, MaxItems, StorageSize>,
+    destructible_variant_base<Variant, MaxItems, StorageSize>
+  > {};
+
 }
 
-template <class Variant, size_t MaxItems, size_t ItemByteSize>
-class variant_array {
-
-  // Enforce static preconditions
-  static_assert(detail::all_trivial_types(Variant {}),
-      "variant_array uses low-level bitpacking techniques to compress its "
-      "memory footprint and can only handle primitive (std::is_trivial) types at this time.");
+template <meta::trivially_swappable Variant, size_t MaxItems, size_t StorageSize>
+class variant_array : private detail::autotrivial_variant_base<Variant, MaxItems, StorageSize> {
 
   public:
 
     // Useful so our iterator can name us a friend type
     static constexpr size_t max_items = MaxItems;
-    static constexpr size_t item_byte_size = ItemByteSize;
+    static constexpr size_t storage_size = StorageSize;
 
     // STL-like member types.
     using iterator_type = detail::vararray_iterator<variant_array>;
@@ -211,26 +378,39 @@ class variant_array {
     // No point in ref-overloads, types are trivial
     void push_back(value_type const& val) noexcept {
       // Copy the data in, packed.
-      std::visit([&] (auto&& arg) noexcept {
+      std::visit([&] <class T>(T&& arg) noexcept {
+        // Indirection here is necessary because we inherit from a template.
+        // This makes all of our inherited properties dependendent names, and
+        // so we have to disambiguate for the compiler.
+        auto& count = this->count;
+        auto& offsets = this->offsets;
+        auto& offset = this->offset;
+        using stored_type = std::decay_t<T>;
+
         // Check invariants
-        using stored_type = std::decay_t<decltype(arg)>;
-        assert(offset + sizeof(arg) + sizeof(uint8_t) < sizeof(data));
+        assert(offset + sizeof(arg) + sizeof(uint8_t) < sizeof(this->data));
 
-        // Book keeping. Keep track of what type this is.
+        // Book keeping. Keep track of the type.
         offsets[count++] = offset;
-        data[offset] = val.index();
-
-        // Increment ongoing offset
-        incr_offset(sizeof(uint8_t));
+        this->get_data()[offset] = val.index();
+        this->incr_offset(sizeof(uint8_t));
 
         // Copy
-        auto* const data_ptr = &data[offset];
-        memcpy(data_ptr, &arg, sizeof(stored_type));
-        incr_offset(sizeof(stored_type));
+        auto* const data_ptr = this->get_data() + offset;
+        if (reinterpret_cast<std::uintptr_t>(data_ptr) & (alignof(stored_type) - 1)) {
+          memcpy(data_ptr, &arg, sizeof(stored_type));
+        } else {
+          new(data_ptr) stored_type(std::forward<T>(arg));
+        }
+        this->incr_offset(sizeof(stored_type));
       }, val);
     }
 
     void pop_back() noexcept {
+      auto& count = this->count;
+      auto& offset = this->offset;
+      auto& offsets = this->offsets;
+
       // Super cheap. Blink and it's gone!
       assert(!empty());
       if (--count) offset = offsets[count - 1];
@@ -238,7 +418,7 @@ class variant_array {
 
     // Throwing variant
     value_type at(size_t const index) const {
-      if (index >= count) {
+      if (index >= size()) {
         throw std::out_of_range("Naughty naughty!");
       }
       return (*this)[index];
@@ -246,14 +426,19 @@ class variant_array {
 
     // Access
     value_type operator [](size_t const index) const noexcept {
+      auto& offsets = this->offsets;
+
       // Defer to our recursive unpacking.
       assert(index < size());
-      return detail::variant_unpacker<value_type>::unpack(&data[offsets[index]]);
+      auto const curr_offset = offsets[index];
+      auto* const curr_data = &this->get_data()[curr_offset + sizeof(uint8_t)];
+      return detail::variant_unpack(this->type_index_for(curr_offset),
+          curr_data, meta::identity<Variant> {}, [] (auto val) { return val; });
     }
 
     value_type back() const noexcept {
       assert(!empty());
-      return (*this)[count - 1];
+      return (*this)[size() - 1];
     }
 
     value_type front() const noexcept {
@@ -261,7 +446,7 @@ class variant_array {
       return (*this)[0];
     }
 
-    size_t size() const noexcept { return count;  }
+    size_t size() const noexcept { return this->count; }
 
     bool empty() const noexcept { return size() == 0; }
 
@@ -271,23 +456,8 @@ class variant_array {
     }
 
     iterator_type end() const noexcept {
-      return iterator_type(count, this);
+      return iterator_type(size(), this);
     }
-
-  private:
-
-    void incr_offset(uint8_t const bytes) noexcept {
-      offset += bytes;
-    }
-
-    void decr_offset(uint8_t const bytes) noexcept {
-      offset -= bytes;
-    }
-
-    uint16_t count = 0;
-    uint16_t offset = 0;
-    std::array<uint8_t, item_byte_size> data = { 0 };
-    std::array<uint16_t, max_items> offsets = { 0 };
 
 };
 
