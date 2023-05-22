@@ -15,7 +15,7 @@
     return lhs.idx op rhs.idx;                                                            \
   }
 
-using myvar = std::variant<double, int, float, std::string>;
+using myvar = std::variant<bool, int, double, std::string, std::unique_ptr<std::string>>;
 
 namespace varvec::meta {
 
@@ -25,6 +25,13 @@ namespace varvec::meta {
   };
   template <class T>
   using identity_t = identity<T>;
+
+  template <class... Funcs>
+  struct overload : Funcs... {
+    using Funcs::operator ()...;
+  };
+  template <class... Funcs>
+  overload(Funcs...) -> overload<Funcs...>;
 
   template <template <class...> class Container, class... Ts>
   constexpr auto max_alignment_of(identity<Container<Ts...>>) {
@@ -40,6 +47,28 @@ namespace varvec::meta {
   constexpr auto min_size_of(identity<Container<Ts...>>) {
     return std::min({sizeof(Ts)...});
   }
+
+  // Base failure case, intentionally unimplemented. The count is the current iteration
+  // number, the needle is what we're looking for, and the haystack is the
+  // list of types we're searching through.
+  template <size_t count, class Needle, class... Haystack>
+  struct index_of_impl;
+
+  // Success case! Needle appears next to itself, and we've found it.
+  template <size_t match, class Needle, class... Haystack>
+  struct index_of_impl<match, Needle, Needle, Haystack...> : std::integral_constant<size_t, match> {};
+
+  // Recursive case. Two unmatched types. Discard the miss, increment the index, and continue.
+  template <size_t idx, class Needle, class Other, class... Haystack>
+  struct index_of_impl<idx, Needle, Other, Haystack...> : index_of_impl<idx + 1, Needle, Haystack...> {};
+
+  // Meta-function computes the list index of a given type in a list.
+  // Precondition: Type must be known to be present in the list
+  template <class T, class... Ts>
+  struct index_of : index_of_impl<0, T, Ts...> {};
+
+  template <class T, class... Ts>
+  constexpr size_t index_of_v = index_of<T, Ts...>::value;
 
   template <class S, template <class...> class T>
   struct is_specialization_of : std::false_type {};
@@ -93,6 +122,43 @@ namespace varvec::storage {
       }
     };
     return recurse.template operator ()<Types...>(recurse, std::index_sequence_for<Types...> {});
+  }
+
+  template <class Storage,
+           template <std::movable...> class Variant, std::movable... Types, class Func>
+  constexpr auto get_aligned_ptr_for(uint8_t curr_type,
+      Storage* curr_data, size_t curr_idx, meta::identity<Variant<Types...>> variant, Func&& callback) {
+    return get_typed_ptr_for(curr_type,
+        curr_data, curr_idx, variant, [&] <class T> (T* ptr) {
+      if constexpr (std::copyable<T>) {
+        if (!storage::aligned_for_type<T>(ptr)) {
+          // Propagates changes back if the user changes anything.
+          struct change_forwarder {
+            change_forwarder(void* orig, void* tmp) : orig(orig), tmp(tmp) {}
+            ~change_forwarder() noexcept {
+              if (memcmp(orig, tmp, sizeof(T))) {
+                memcpy(orig, tmp, sizeof(T));
+              }
+            }
+            void* orig;
+            void* tmp;
+          };
+
+          // Only trivially copyable types should ever be misaligned.
+          assert(std::is_trivially_copyable_v<T>);
+
+          // Realign and return.
+          std::aligned_storage_t<sizeof(T), alignof(T)> tmp;
+          change_forwarder forwarder {ptr, &tmp};
+          memcpy(&tmp, ptr, sizeof(T));
+          (void) forwarder;
+          return std::forward<Func>(callback)(std::launder(reinterpret_cast<T*>(&tmp)));
+        }
+      } else {
+        assert(storage::aligned_for_type<T>(ptr));
+      }
+      return std::forward<Func>(callback)(ptr);
+    });
   }
 
   // FIXME: Make noexcept conditional
@@ -401,6 +467,16 @@ namespace varvec::storage {
     using autocopyable_dynamic_storage_base_t<Variant>::operator [];
   };
 
+  template <class T>
+  constexpr auto copyable_type_for() {
+    if constexpr (std::copyable<T>) {
+      return meta::identity<T> {};
+    } else {
+      static_assert(std::movable<T>);
+      return meta::identity<T*> {};
+    }
+  }
+
 }
 
 namespace varvec {
@@ -410,50 +486,84 @@ namespace varvec {
 
     public:
 
-      using storage_type = Storage<Variant<Types...>>;
-      using value_type = Variant<Types...>;
+      using logical_type = Variant<Types...>;
+      using value_type = Variant<
+        typename decltype(storage::copyable_type_for<Types>())::type...
+      >;
+      using storage_type = Storage<logical_type>;
 
       // FIXME: Handle noexcept
       template <class ValueType>
-      requires meta::is_specialization_of_v<std::decay_t<ValueType>, Variant>
+      requires std::is_same_v<std::decay_t<ValueType>, logical_type>
       void push_back(ValueType&& val) {
-        std::visit([&] <class T> (T&& arg) {
-          using stored_type = std::decay_t<T>;
-          auto& offset = storage.offset;
-          auto* const base_ptr = storage.get_data() + offset;
-          auto* data_ptr = base_ptr;
+        std::visit([&] <class T> (T&& arg) { push_back(std::forward<T>(arg)); }, std::forward<ValueType>(val));
+      }
 
-          // Figure out how much space we'll need.
-          auto const required_bytes = sizeof(arg);
-          if constexpr (!std::is_trivially_copyable_v<stored_type>) {
-            data_ptr = storage::realign_for_type<stored_type>(data_ptr);
-          }
-          auto const alignment_bytes = data_ptr - base_ptr;
+      // FIXME: Handle noexcept
+      template <class ValueType>
+      requires (
+          std::is_constructible_v<logical_type, ValueType>
+          &&
+          !std::is_same_v<std::decay_t<ValueType>, logical_type>
+      )
+      void push_back(ValueType&& val) {
+        using stored_type = std::decay_t<ValueType>;
+        auto& offset = impl.offset;
+        auto* const base_ptr = impl.get_data() + offset;
+        auto* data_ptr = base_ptr;
 
-          // Check if we have it.
-          while (!storage.has_space(required_bytes + alignment_bytes)) {
-            // Rethink this
-            // Will throw for static vector
-            data_ptr = storage.resize(storage.size() * 2);
-          }
+        // Figure out how much space we'll need.
+        auto const required_bytes = sizeof(val);
+        if constexpr (!std::is_trivially_copyable_v<stored_type>) {
+          data_ptr = storage::realign_for_type<stored_type>(data_ptr);
+        }
+        auto const alignment_bytes = data_ptr - base_ptr;
 
-          storage.incr_offset(alignment_bytes);
-          auto const curr_count = storage.count++;
-          if constexpr (std::is_trivially_copyable_v<stored_type>) {
-            // May copy to a misaligned address
-            memcpy(data_ptr, &arg, sizeof(stored_type));
-          } else {
-            new(data_ptr) stored_type(std::forward<T>(arg));
-          }
-          storage.meta[curr_count].type = val.index();
-          storage.meta[curr_count].offset = offset;
-          storage.incr_offset(required_bytes);
-        }, std::forward<ValueType>(val));
+        // Check if we have it.
+        while (!impl.has_space(required_bytes + alignment_bytes)) {
+          // Rethink this
+          // Will throw for static vector
+          data_ptr = impl.resize(impl.size() * 2);
+        }
+
+        impl.incr_offset(alignment_bytes);
+        auto const curr_count = impl.count++;
+        if constexpr (std::is_trivially_copyable_v<stored_type>) {
+          // May copy to a misaligned address
+          memcpy(data_ptr, &val, sizeof(stored_type));
+        } else {
+          new(data_ptr) stored_type(std::forward<ValueType>(val));
+        }
+        impl.meta[curr_count].type = meta::index_of_v<stored_type, Types...>;
+        impl.meta[curr_count].offset = offset;
+        impl.incr_offset(required_bytes);
+      }
+
+      // FIXME: Handle noexcept
+      value_type operator [](size_t index) const {
+        assert(index < size());
+        auto const& meta = impl.meta[index];
+        auto* const curr_ptr = impl.get_data() + meta.offset;
+        return storage::get_aligned_ptr_for(meta.type, curr_ptr,
+            index, meta::identity<logical_type> {}, [&] <class T> (T* ptr) -> value_type {
+          if constexpr (std::copyable<T>) return *ptr;
+          else return ptr;
+        });
+      }
+
+      // FIXME: Handle noexcept
+      value_type top() const {
+        assert(impl.count);
+        return (*this)[impl.count - 1];
+      }
+
+      size_t size() const noexcept {
+        return impl.count;
       }
 
     private:
 
-      storage_type storage;
+      storage_type impl;
 
   };
 
@@ -474,14 +584,17 @@ namespace varvec {
 }
 
 int main() {
-  varvec::static_variable_vector<256, 16, bool, int, double, std::string> vec;
+  varvec::static_variable_vector<256, 16, bool, int, double, std::string, std::unique_ptr<std::string>> vec;
   //static_assert(std::is_trivially_destructible_v<decltype(vec)>);
-
+  
   vec.push_back(myvar {1}); // 0
-  vec.push_back(myvar {"hello world"}); // 1
-  vec.push_back(myvar {"hello world"}); // 2
-  vec.push_back(myvar {"hello world"}); // 3
-  vec.push_back(myvar {"hello world"}); // 4
+  vec.push_back(myvar {std::make_unique<std::string>("hello world")}); // 1
+
+  auto val = vec[1];
+  std::visit(varvec::meta::overload {
+    [] <class T> (T* ptr) { std::cout << **ptr << std::endl; },
+    [] (auto& v) { std::cout << v << std::endl; }
+  }, val);
   /*
   vec.push_back(myvar {"hello world"}); // 5
   vec.push_back(myvar {"hello world"}); // 6
