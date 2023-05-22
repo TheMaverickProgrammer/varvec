@@ -48,6 +48,16 @@ namespace varvec::meta {
     return std::min({sizeof(Ts)...});
   }
 
+  template <class T>
+  constexpr auto copyable_type_for() {
+    if constexpr (std::copyable<T>) {
+      return meta::identity<T> {};
+    } else {
+      static_assert(std::movable<T>);
+      return meta::identity<T*> {};
+    }
+  }
+
   // Base failure case, intentionally unimplemented. The count is the current iteration
   // number, the needle is what we're looking for, and the haystack is the
   // list of types we're searching through.
@@ -69,15 +79,6 @@ namespace varvec::meta {
 
   template <class T, class... Ts>
   constexpr size_t index_of_v = index_of<T, Ts...>::value;
-
-  template <class S, template <class...> class T>
-  struct is_specialization_of : std::false_type {};
-
-  template <class... Args, template <class...> class T>
-  struct is_specialization_of<T<Args...>, T> : std::true_type {};
-
-  template <class S, template <class...> class T>
-  constexpr bool is_specialization_of_v = is_specialization_of<S, T>::value;
 
 }
 
@@ -101,13 +102,17 @@ namespace varvec::storage {
     return std::bit_cast<P*>(((offset + (alignment - 1)) & ~(alignment - 1)));
   }
 
+  // Given a type index, an object base pointer, a list of variant types, and a generic callback,
+  // function implements a std::visit-esque interface where it unwraps and types the underlying
+  // packed object storage, passing through a pointer to the callback function.
+  // The passed pointer is NOT guaranteed to be well aligned for the given type.
   template <class Storage,
            template <std::movable...> class Variant, std::movable... Types, class Func>
-  constexpr auto get_typed_ptr_for(uint8_t curr_type,
-      Storage* curr_data, size_t curr_idx, meta::identity<Variant<Types...>>, Func&& callback) {
+  constexpr decltype(auto) get_typed_ptr_for(uint8_t curr_type,
+      Storage* curr_data, meta::identity<Variant<Types...>>, Func&& callback) {
     // Lol. Not sure this is better than the old way
-    auto recurse =
-      [&] <class T, class... Ts, class Cont, size_t idx, size_t... idxs> (Cont&& cont, std::index_sequence<idx, idxs...>) {
+    auto recurse = [&] <class T, class... Ts, class Cont, size_t idx, size_t... idxs>
+      (Cont&& cont, std::index_sequence<idx, idxs...>) -> decltype(auto) {
       // If this is the index for our type, cast the pointer into the proper type and call the callback.
       if (idx == curr_type) return std::forward<Func>(callback)(std::bit_cast<T*>(curr_data));
 
@@ -124,18 +129,24 @@ namespace varvec::storage {
     return recurse.template operator ()<Types...>(recurse, std::index_sequence_for<Types...> {});
   }
 
+
+  // Given a type index, an object base pointer, a list of variant types, and a generic callback,
+  // function implements a std::visit-esque interface where it unwraps and types the underlying
+  // packed object storage, passing through a pointer to the callback function.
+  // The passed pointer IS guaranteed to be well aligned for the given type.
   template <class Storage,
            template <std::movable...> class Variant, std::movable... Types, class Func>
-  constexpr auto get_aligned_ptr_for(uint8_t curr_type,
-      Storage* curr_data, size_t curr_idx, meta::identity<Variant<Types...>> variant, Func&& callback) {
+  constexpr decltype(auto) get_aligned_ptr_for(uint8_t curr_type,
+      Storage* curr_data, meta::identity<Variant<Types...>> variant, Func&& callback) {
     return get_typed_ptr_for(curr_type,
-        curr_data, curr_idx, variant, [&] <class T> (T* ptr) {
+        curr_data, variant, [&] <class T> (T* ptr) {
       if constexpr (std::copyable<T>) {
         if (!storage::aligned_for_type<T>(ptr)) {
           // Propagates changes back if the user changes anything.
           struct change_forwarder {
             change_forwarder(void* orig, void* tmp) : orig(orig), tmp(tmp) {}
             ~change_forwarder() noexcept {
+              // XXX: Is this worth it? Could just copy
               if (memcmp(orig, tmp, sizeof(T))) {
                 memcpy(orig, tmp, sizeof(T));
               }
@@ -167,8 +178,8 @@ namespace varvec::storage {
     for (size_t i = 0; i < count; ++i) {
       auto const type = meta[i].type;
       auto const offset = meta[i].offset;
-      get_typed_ptr_for(type, src + offset, i, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
-        get_typed_ptr_for(type, dest + offset, i, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
+      get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
+        get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
           if constexpr (std::is_same_v<S, D>) {
             new(destptr) D(std::move(*srcptr));
           } else {
@@ -184,8 +195,8 @@ namespace varvec::storage {
     for (size_t i = 0; i < count; ++i) {
       auto const type = meta[i].type;
       auto const offset = meta[i].offset;
-      get_typed_ptr_for(type, src + offset, i, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
-        get_typed_ptr_for(type, dest + offset, i, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
+      get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
+        get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
           if constexpr (std::is_same_v<S, D>) {
             new(destptr) D(*srcptr);
           } else {
@@ -344,8 +355,7 @@ namespace varvec::storage {
         auto const curr_type = this->meta[curr_count].type;
         auto const curr_offset = this->meta[curr_count].offset;
         auto* const curr_ptr = this->get_data() + curr_offset;
-        get_typed_ptr_for(curr_type, curr_ptr,
-            curr_count, meta::identity<Variant> {}, [&] <class T> (T* value) {
+        get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
           value->~T();
         });
       }
@@ -424,8 +434,7 @@ namespace varvec::storage {
         auto const curr_type = this->meta[curr_count].type;
         auto const curr_offset = this->meta[curr_count].offset;
         auto* const curr_ptr = this->get_data() + curr_offset;
-        get_typed_ptr_for(curr_type, curr_ptr,
-            curr_count, meta::identity<Variant> {}, [&] <class T> (T* value) {
+        get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
           value->~T();
         });
       }
@@ -467,16 +476,6 @@ namespace varvec::storage {
     using autocopyable_dynamic_storage_base_t<Variant>::operator [];
   };
 
-  template <class T>
-  constexpr auto copyable_type_for() {
-    if constexpr (std::copyable<T>) {
-      return meta::identity<T> {};
-    } else {
-      static_assert(std::movable<T>);
-      return meta::identity<T*> {};
-    }
-  }
-
 }
 
 namespace varvec {
@@ -488,7 +487,7 @@ namespace varvec {
 
       using logical_type = Variant<Types...>;
       using value_type = Variant<
-        typename decltype(storage::copyable_type_for<Types>())::type...
+        typename decltype(meta::copyable_type_for<Types>())::type...
       >;
       using storage_type = Storage<logical_type>;
 
@@ -545,20 +544,44 @@ namespace varvec {
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
         return storage::get_aligned_ptr_for(meta.type, curr_ptr,
-            index, meta::identity<logical_type> {}, [&] <class T> (T* ptr) -> value_type {
+            index, meta::identity<logical_type> {}, [] <class T> (T* ptr) -> value_type {
           if constexpr (std::copyable<T>) return *ptr;
           else return ptr;
         });
       }
 
+      template <class Func>
+      requires std::conjunction_v<std::is_invocable<Func, Types&>...>
+      decltype(auto) visit_at(size_t index, Func&& callback)
+        noexcept(std::conjunction_v<std::is_nothrow_invocable<Func, Types&>...>)
+      {
+        assert(index < size());
+        auto const& meta = impl.meta[index];
+        auto* const curr_ptr = impl.get_data() + meta.offset;
+        return storage::get_aligned_ptr_for(meta.type, curr_ptr,
+            meta::identity<logical_type> {}, [&] <class T> (T* ptr) -> decltype(auto) {
+          return std::forward<Func>(callback)(*ptr);
+        });
+      }
+
       // FIXME: Handle noexcept
-      value_type top() const {
+      value_type front() const {
+        assert(impl.count);
+        return (*this)[0];
+      }
+
+      // FIXME: Handle noexcept
+      value_type back() const {
         assert(impl.count);
         return (*this)[impl.count - 1];
       }
 
       size_t size() const noexcept {
         return impl.count;
+      }
+
+      bool empty() const noexcept {
+        return size() == 0;
       }
 
     private:
@@ -589,12 +612,11 @@ int main() {
   
   vec.push_back(myvar {1}); // 0
   vec.push_back(myvar {std::make_unique<std::string>("hello world")}); // 1
+  vec.visit_at(1, varvec::meta::overload {
+      [] <class T> (std::unique_ptr<T>& ptr) { std::cout << *ptr << std::endl; },
+      [] (auto& other) { std::cout << other << std::endl; }
+  });
 
-  auto val = vec[1];
-  std::visit(varvec::meta::overload {
-    [] <class T> (T* ptr) { std::cout << **ptr << std::endl; },
-    [] (auto& v) { std::cout << v << std::endl; }
-  }, val);
   /*
   vec.push_back(myvar {"hello world"}); // 5
   vec.push_back(myvar {"hello world"}); // 6
