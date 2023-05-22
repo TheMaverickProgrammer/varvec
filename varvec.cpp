@@ -480,15 +480,129 @@ namespace varvec::storage {
 
 namespace varvec {
 
+  template <template <class> class, template <std::movable...> class, std::movable...>
+  class basic_variable_vector;
+
+  template <template <class> class Storage, template <std::movable...> class Variant, std::movable... Types>
+  class basic_variable_iterator {
+
+    public:
+
+      using container_type = basic_variable_vector<Storage, Variant, Types...>;
+
+      using iterator_category = std::random_access_iterator_tag;
+      using value_type = typename container_type::value_type;
+      using difference_type = typename container_type::difference_type;
+      using reference = value_type&;
+      using size_type = typename container_type::size_type;
+
+      // Because default construction is useful.
+      // Be careful!
+      basic_variable_iterator() noexcept :
+        idx(0),
+        storage(nullptr)
+      {}
+
+      basic_variable_iterator(basic_variable_iterator const& other) noexcept :
+        idx(other.idx),
+        storage(other.storage)
+      {}
+
+      basic_variable_iterator& operator =(basic_variable_iterator const& other) noexcept {
+        if (&other == this) {
+          return *this;
+        }
+        idx = other.idx;
+        storage = other.storage;
+        return *this;
+      }
+
+      // FIXME: Handle noexcept
+      value_type operator *() const {
+        assert(storage);
+        return (*storage)[idx];
+      }
+
+      basic_variable_iterator& operator ++() noexcept {
+        ++idx;
+        return *this;
+      }
+
+      basic_variable_iterator& operator --() noexcept {
+        --idx;
+        return *this;
+      }
+
+      basic_variable_iterator operator ++(int) const noexcept {
+        auto tmp {*this};
+        ++tmp;
+        return tmp;
+      }
+
+      basic_variable_iterator operator --(int) const noexcept {
+        auto tmp {*this};
+        --tmp;
+        return tmp;
+      }
+
+    private:
+
+      basic_variable_iterator(size_type idx, container_type const* storage) noexcept :
+        idx(idx),
+        storage(storage)
+      {}
+
+      friend class basic_variable_vector<Storage, Variant, Types...>;
+
+      size_type idx;
+      container_type const* storage;
+
+      friend bool operator ==(basic_variable_iterator const& lhs, basic_variable_iterator const& rhs) noexcept {
+        return lhs.idx == rhs.idx && lhs.storage == rhs.storage;
+      }
+
+      friend bool operator !=(basic_variable_iterator const& lhs, basic_variable_iterator const& rhs) noexcept {
+        return !(lhs == rhs);
+      }
+
+      friend auto operator <=>(basic_variable_iterator const& lhs, basic_variable_iterator const& rhs) noexcept {
+        return lhs.idx <=> rhs.idx;
+      }
+
+      friend basic_variable_iterator operator -(basic_variable_iterator const& lhs, std::ptrdiff_t rhs) noexcept {
+        auto tmp {lhs};
+        auto tmpidx = lhs.idx - rhs;
+        tmp.idx = tmpidx;
+        return tmp;
+      }
+
+      friend basic_variable_iterator operator +(basic_variable_iterator const& lhs, std::ptrdiff_t rhs) noexcept {
+        auto tmp {lhs};
+        auto tmpidx = lhs.idx + rhs;
+        tmp.idx = tmpidx;
+        return tmp;
+      }
+
+      friend basic_variable_iterator operator +(std::ptrdiff_t lhs, basic_variable_iterator const& rhs) noexcept {
+        return rhs + lhs;
+      }
+
+  };
+
   template <template <class> class Storage, template <std::movable...> class Variant, std::movable... Types>
   class basic_variable_vector {
 
     public:
 
-      using logical_type = Variant<Types...>;
       using value_type = Variant<
         typename decltype(meta::copyable_type_for<Types>())::type...
       >;
+      using size_type = size_t;
+      using difference_type = std::ptrdiff_t;
+      using iterator = basic_variable_iterator<Storage, Variant, Types...>;
+      using const_iterator = iterator;
+
+      using logical_type = Variant<Types...>;
       using storage_type = Storage<logical_type>;
 
       // FIXME: Handle noexcept
@@ -539,12 +653,12 @@ namespace varvec {
       }
 
       // FIXME: Handle noexcept
-      value_type operator [](size_t index) const {
+      value_type operator [](size_type index) const {
         assert(index < size());
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
         return storage::get_aligned_ptr_for(meta.type, curr_ptr,
-            index, meta::identity<logical_type> {}, [] <class T> (T* ptr) -> value_type {
+            meta::identity<logical_type> {}, [] <class T> (T* ptr) -> value_type {
           if constexpr (std::copyable<T>) return *ptr;
           else return ptr;
         });
@@ -552,7 +666,7 @@ namespace varvec {
 
       template <class Func>
       requires std::conjunction_v<std::is_invocable<Func, Types&>...>
-      decltype(auto) visit_at(size_t index, Func&& callback)
+      decltype(auto) visit_at(size_type index, Func&& callback)
         noexcept(std::conjunction_v<std::is_nothrow_invocable<Func, Types&>...>)
       {
         assert(index < size());
@@ -576,12 +690,20 @@ namespace varvec {
         return (*this)[impl.count - 1];
       }
 
-      size_t size() const noexcept {
+      size_type size() const noexcept {
         return impl.count;
       }
 
       bool empty() const noexcept {
         return size() == 0;
+      }
+
+      iterator begin() const noexcept {
+        return iterator {0, this};
+      }
+
+      iterator end() const noexcept {
+        return iterator {size(), this};
       }
 
     private:
@@ -612,26 +734,20 @@ int main() {
   
   vec.push_back(myvar {1}); // 0
   vec.push_back(myvar {std::make_unique<std::string>("hello world")}); // 1
-  vec.visit_at(1, varvec::meta::overload {
-      [] <class T> (std::unique_ptr<T>& ptr) { std::cout << *ptr << std::endl; },
-      [] (auto& other) { std::cout << other << std::endl; }
-  });
 
-  /*
-  vec.push_back(myvar {"hello world"}); // 5
-  vec.push_back(myvar {"hello world"}); // 6
-  vec.push_back(myvar {"hello world"}); // 7
-  vec.push_back(myvar {"hello world"}); // 8
   vec.push_back(myvar {"hello world"});
   vec.push_back(myvar {"hello world"});
   vec.push_back(myvar {"hello world"});
   vec.push_back(myvar {"hello world"});
   vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  */
+
+  for (auto val : vec) {
+    std::visit(varvec::meta::overload {
+      [] (auto* ptr) { std::cout << **ptr << std::endl; },
+      [] (auto& v) { std::cout << v << std::endl; }
+    }, val);
+  }
+
   /*
   variable_vector<10, 50, double, int, float, std::string> thing;
 
