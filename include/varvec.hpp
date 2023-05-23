@@ -15,8 +15,6 @@
     return lhs.idx op rhs.idx;                                                            \
   }
 
-using myvar = std::variant<bool, int, double, std::unique_ptr<std::string>>;
-
 namespace varvec::meta {
 
   template <class T>
@@ -717,20 +715,4 @@ namespace varvec {
     Types...
   >;
 
-}
-
-int main() {
-  varvec::vector<bool, int, double, std::unique_ptr<std::string>> vec;
-  
-  vec.push_back(myvar {true}); // 0
-  vec.push_back(myvar {2});
-  vec.push_back(myvar {3.14159});
-
-  auto avec = std::move(vec);
-  for (auto val : avec) {
-    std::visit(varvec::meta::overload {
-      [] (auto* ptr) { std::cout << **ptr << std::endl; },
-      [] (auto& v) { std::cout << v << std::endl; }
-    }, val);
-  }
 }
