@@ -15,7 +15,7 @@
     return lhs.idx op rhs.idx;                                                            \
   }
 
-using myvar = std::variant<bool, int, double, std::string, std::unique_ptr<std::string>>;
+using myvar = std::variant<bool, int, double, std::unique_ptr<std::string>>;
 
 namespace varvec::meta {
 
@@ -191,13 +191,17 @@ namespace varvec::storage {
   }
 
   template <class Variant, class Storage, class Metadata>
-  constexpr auto copy_storage(size_t count, Metadata const& meta, Storage* dest, Storage* src) noexcept {
+  constexpr auto copy_storage(size_t count, Metadata const& meta, Storage* dest, Storage const* src) noexcept {
     for (size_t i = 0; i < count; ++i) {
       auto const type = meta[i].type;
       auto const offset = meta[i].offset;
       get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
         get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
-          if constexpr (std::is_same_v<S, D>) {
+          constexpr bool types_match = std::is_same_v<S, D>;
+
+          if constexpr (types_match && std::is_trivially_copyable_v<D>) {
+            memcpy(destptr, srcptr, sizeof(D));
+          } else if constexpr (types_match) {
             new(destptr) D(*srcptr);
           } else {
             __builtin_unreachable();
@@ -221,7 +225,7 @@ namespace varvec::storage {
     static constexpr auto start_size = memcount;
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
 
-    static_storage_base() noexcept {}
+    static_storage_base() noexcept : count(0), offset(0), meta({0}), data({0}) {}
 
     explicit static_storage_base(size_t start_bytes) {
       if (start_bytes > bytes) {
@@ -229,8 +233,8 @@ namespace varvec::storage {
       }
     }
 
-    static_storage_base(static_storage_base const&) = delete;
-    static_storage_base(static_storage_base&&) = delete;
+    static_storage_base(static_storage_base const&) = default;
+    static_storage_base(static_storage_base&&) = default;
     ~static_storage_base() = default;
 
     uint8_t operator [](size_t offset) const noexcept {
@@ -263,10 +267,10 @@ namespace varvec::storage {
     }
 
     // FIXME: Make these sizes configurable
-    uint16_t count {0};
-    uint16_t offset {0};
-    std::array<storage_metadata<uint16_t>, memcount> meta {0};
-    storage_type<Variant, bytes> data {0};
+    uint16_t count;
+    uint16_t offset;
+    std::array<storage_metadata<uint16_t>, memcount> meta;
+    storage_type<Variant, bytes> data;
 
   };
 
@@ -284,7 +288,7 @@ namespace varvec::storage {
     {}
 
     dynamic_storage_base(dynamic_storage_base const&) = delete;
-    dynamic_storage_base(dynamic_storage_base&&) = delete;
+    dynamic_storage_base(dynamic_storage_base&&) = default;
     ~dynamic_storage_base() = default;
 
     uint8_t operator [](size_t offset) const noexcept {
@@ -338,14 +342,8 @@ namespace varvec::storage {
 
     // FIXME: Make noexcept conditional
     movable_static_storage_base(movable_static_storage_base&& other) noexcept :
-      static_storage_base<Variant, bytes, memcount>()
+      static_storage_base<Variant, bytes, memcount>(std::move(other))
     {
-      // Copy state
-      this->count = other.count;
-      this->offset = other.offset;
-      this->meta = other.meta;
-
-      // Move data
       move_storage(this->count, this->meta, this->get_data(), other.get_data());
     }
 
@@ -370,14 +368,8 @@ namespace varvec::storage {
 
     // FIXME: Add conditional noexcept
     copyable_static_storage_base(copyable_static_storage_base const& other) :
-      movable_static_storage_base<Variant, bytes, memcount>()
+      movable_static_storage_base<Variant, bytes, memcount>(other)
     {
-      // Copy state
-      this->count = other.count;
-      this->offset = other.offset;
-      this->meta = other.meta;
-
-      // Copy data
       copy_storage<Variant>(this->count, this->meta, this->get_data(), other.get_data());
     }
 
@@ -417,15 +409,11 @@ namespace varvec::storage {
 
     // FIXME: Make noexcept conditional
     movable_dynamic_storage_base(movable_dynamic_storage_base&& other) noexcept :
-      dynamic_storage_base<Variant>()
+      dynamic_storage_base<Variant>(std::move(other))
     {
-      // Copy state
-      this->count = other.count;
-      this->offset = other.offset;
-
-      // Move data
-      this->meta = std::move(other.meta);
-      this->data = std::move(other.data);
+      other.bytes = 0;
+      other.count = 0;
+      other.offset = 0;
     }
 
     ~movable_dynamic_storage_base() noexcept {
@@ -438,7 +426,6 @@ namespace varvec::storage {
           value->~T();
         });
       }
-
     }
 
     using dynamic_storage_base<Variant>::operator [];
@@ -698,6 +685,10 @@ namespace varvec {
         return size() == 0;
       }
 
+      size_type used_bytes() const noexcept {
+        return impl.size();
+      }
+
       iterator begin() const noexcept {
         return iterator {0, this};
       }
@@ -713,14 +704,14 @@ namespace varvec {
   };
 
   template <size_t max_bytes, size_t memcount, std::movable... Types>
-  using static_variable_vector = basic_variable_vector<
+  using static_vector = basic_variable_vector<
     storage::static_storage_context<max_bytes, memcount>::template static_storage,
     std::variant,
     Types...
   >;
 
   template <std::movable... Types>
-  using dynamic_variable_vector = basic_variable_vector<
+  using vector = basic_variable_vector<
     storage::dynamic_storage,
     std::variant,
     Types...
@@ -729,56 +720,17 @@ namespace varvec {
 }
 
 int main() {
-  varvec::static_variable_vector<256, 16, bool, int, double, std::string, std::unique_ptr<std::string>> vec;
-  //static_assert(std::is_trivially_destructible_v<decltype(vec)>);
+  varvec::vector<bool, int, double, std::unique_ptr<std::string>> vec;
   
-  vec.push_back(myvar {1}); // 0
-  vec.push_back(myvar {std::make_unique<std::string>("hello world")}); // 1
+  vec.push_back(myvar {true}); // 0
+  vec.push_back(myvar {2});
+  vec.push_back(myvar {3.14159});
 
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-  vec.push_back(myvar {"hello world"});
-
-  for (auto val : vec) {
+  auto avec = std::move(vec);
+  for (auto val : avec) {
     std::visit(varvec::meta::overload {
       [] (auto* ptr) { std::cout << **ptr << std::endl; },
       [] (auto& v) { std::cout << v << std::endl; }
     }, val);
   }
-
-  /*
-  variable_vector<10, 50, double, int, float, std::string> thing;
-
-  thing.push_back(1);
-  thing.push_back((float) 2.2);
-  thing.push_back((double) 3.3);
-  thing.push_back("hello world");
-
-  for (auto const value : thing) {
-    std::visit([](auto const arg) { std::cout << arg << std::endl;  }, value);
-  }
-
-  assert(thing.front() == myvar {1});
-  assert(thing.back() == myvar {"hello world"});
-
-  assert(thing.begin() + 4 == thing.end());
-  assert(4 + thing.begin() == thing.end());
-  assert(thing.begin() == thing.end() - 4);
-  assert(thing.begin() < thing.end());
-  assert(thing.begin() <= thing.end());
-  assert(thing.end() > thing.begin());
-  assert(thing.end() >= thing.begin());
-
-  thing.pop_back();
-  thing.pop_back();
-  thing.pop_back();
-  thing.pop_back();
-
-  for (auto const value : thing) {
-    std::visit([](auto const arg) { assert(false); }, value);
-  }
-  assert(thing.empty());
-  */
 }
