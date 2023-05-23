@@ -22,7 +22,13 @@ namespace varvec::meta {
     using type = T;
   };
   template <class T>
-  using identity_t = identity<T>;
+  using identity_t = typename identity<T>::type;
+
+  template <class... Ts>
+  struct type_list {
+    template <template <class...> class Func>
+    using apply_t = Func<Ts...>;
+  };
 
   template <class... Funcs>
   struct overload : Funcs... {
@@ -46,6 +52,38 @@ namespace varvec::meta {
     return std::min({sizeof(Ts)...});
   }
 
+  template <class... Ts>
+  struct simulated_overload_resolution_impl {
+    identity<void> operator ()(...) const;
+  };
+
+  template <class T, class... Ts>
+  struct simulated_overload_resolution_impl<T, Ts...> : simulated_overload_resolution_impl<Ts...> {
+    template <class U>
+    using array_type = U[1];
+
+    // XXX: The requires clause here is stupidly non-obvious.
+    // We're trying to solve the problem of std::variant<bool, std::string> {"hello"}
+    // selecting its type as "bool". This is the behavior in C++17, but in C++20 the
+    // wording around the variant converting constructor changed.
+    // In C++17 it's supposed to select types as-if performing overload resolution for
+    // the same, but this prefers bool over std::string in the above example.
+    // In C++20 this was changed so that it still runs overload resolution, but first
+    // filters out those types for which the expression "U u[] = {std::forward<T>(t)};"
+    // isn't valid (assuming T is the incoming type and U is the potential conversion.
+    // 
+    // Somehow this manages to fix the issue in most cases, and gets std::string chosen.
+    template <class U>
+    requires requires { array_type<T>{std::declval<U>()}; }
+    identity<T> operator ()(T const&, U const&) const;
+
+    using simulated_overload_resolution_impl<Ts...>::operator ();
+  };
+
+  template <class T, class... Ts>
+  using fuzzy_type_match_t =
+      typename decltype(simulated_overload_resolution_impl<Ts...> {}(std::declval<T>(), std::declval<T>()))::type;
+
   template <class T>
   constexpr auto copyable_type_for() {
     if constexpr (std::copyable<T>) {
@@ -55,6 +93,9 @@ namespace varvec::meta {
       return meta::identity<T*> {};
     }
   }
+
+  template <class T>
+  using copyable_type_for_t = typename decltype(copyable_type_for<T>())::type;
 
   // Base failure case, intentionally unimplemented. The count is the current iteration
   // number, the needle is what we're looking for, and the haystack is the
@@ -231,8 +272,26 @@ namespace varvec::storage {
       }
     }
 
-    static_storage_base(static_storage_base const&) = default;
-    static_storage_base(static_storage_base&&) = default;
+    // FIXME: Handle noexcept
+    static_storage_base(static_storage_base const& other)
+      requires std::copyable<Variant>
+    :
+      count(other.count),
+      offset(other.offset),
+      meta(other.meta)
+    {
+      copy_storage<Variant>(count, meta, get_data(), other.get_data());
+    }
+
+    // FIXME: Handle noexcept
+    static_storage_base(static_storage_base&& other) noexcept :
+      count(other.count),
+      offset(other.offset),
+      meta(other.meta)
+    {
+      move_storage(count, meta, get_data(), other.get_data());
+    }
+
     ~static_storage_base() = default;
 
     uint8_t operator [](size_t offset) const noexcept {
@@ -272,22 +331,71 @@ namespace varvec::storage {
 
   };
 
+  template <class Variant, size_t bytes, size_t memcount>
+  struct destructible_static_storage_base : static_storage_base<Variant, bytes, memcount> {
+    ~destructible_static_storage_base() noexcept {
+      while (this->count) {
+        auto const curr_count = --this->count;
+        auto const curr_type = this->meta[curr_count].type;
+        auto const curr_offset = this->meta[curr_count].offset;
+        auto* const curr_ptr = this->get_data() + curr_offset;
+        get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
+          value->~T();
+        });
+      }
+    }
+
+    using static_storage_base<Variant, bytes, memcount>::operator [];
+  };
+
   template <class Variant>
-  struct dynamic_storage_base {
+  struct dynamic_storage {
 
     using variant_type = Variant;
 
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
     static constexpr auto start_size = 8 * meta::max_size_of(meta::identity<variant_type> {});
 
-    dynamic_storage_base() :
+    dynamic_storage() :
       meta(std::ceil(start_size / (double) meta::min_size_of(meta::identity<Variant> {}))),
       data(new (std::align_val_t(max_alignment)) uint8_t[start_size])
     {}
 
-    dynamic_storage_base(dynamic_storage_base const&) = delete;
-    dynamic_storage_base(dynamic_storage_base&&) = default;
-    ~dynamic_storage_base() = default;
+    dynamic_storage(dynamic_storage const& other)
+      requires std::copyable<Variant>
+    :
+      bytes(other.bytes),
+      count(other.count),
+      offset(other.offset),
+      meta(other.meta),
+      data(new (std::align_val_t(max_alignment)) uint8_t[bytes])
+    {
+      copy_storage<Variant>(count, meta, get_data(), other.get_data());
+    }
+
+    dynamic_storage(dynamic_storage&& other) noexcept :
+      bytes(other.bytes),
+      count(other.count),
+      offset(other.offset),
+      meta(std::move(other.meta)),
+      data(std::move(other.data))
+    {
+      bytes = 0;
+      count = 0;
+      offset = 0;
+    }
+
+    ~dynamic_storage() noexcept {
+      while (this->count) {
+        auto const curr_count = --this->count;
+        auto const curr_type = this->meta[curr_count].type;
+        auto const curr_offset = this->meta[curr_count].offset;
+        auto* const curr_ptr = this->get_data() + curr_offset;
+        get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
+          value->~T();
+        });
+      }
+    }
 
     uint8_t operator [](size_t offset) const noexcept {
       return data[offset];
@@ -333,63 +441,11 @@ namespace varvec::storage {
   };
 
   template <class Variant, size_t bytes, size_t memcount>
-  struct movable_static_storage_base : static_storage_base<Variant, bytes, memcount> {
-    movable_static_storage_base() noexcept {}
-
-    movable_static_storage_base(movable_static_storage_base const&) = delete;
-
-    // FIXME: Make noexcept conditional
-    movable_static_storage_base(movable_static_storage_base&& other) noexcept :
-      static_storage_base<Variant, bytes, memcount>(std::move(other))
-    {
-      move_storage(this->count, this->meta, this->get_data(), other.get_data());
-    }
-
-    ~movable_static_storage_base() noexcept {
-      while (this->count) {
-        auto const curr_count = --this->count;
-        auto const curr_type = this->meta[curr_count].type;
-        auto const curr_offset = this->meta[curr_count].offset;
-        auto* const curr_ptr = this->get_data() + curr_offset;
-        get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
-          value->~T();
-        });
-      }
-    }
-
-    using static_storage_base<Variant, bytes, memcount>::operator [];
-  };
-
-  template <class Variant, size_t bytes, size_t memcount>
-  struct copyable_static_storage_base : movable_static_storage_base<Variant, bytes, memcount> {
-    using movable_static_storage_base<Variant, bytes, memcount>::movable_static_storage_base;
-
-    // FIXME: Add conditional noexcept
-    copyable_static_storage_base(copyable_static_storage_base const& other) :
-      movable_static_storage_base<Variant, bytes, memcount>(other)
-    {
-      copy_storage<Variant>(this->count, this->meta, this->get_data(), other.get_data());
-    }
-
-    using movable_static_storage_base<Variant, bytes, memcount>::operator [];
-  };
-
-  template <class Variant, size_t bytes, size_t memcount>
-  using autocopyable_static_storage_base_t = std::conditional_t<
-    std::is_copy_constructible_v<Variant>,
-    copyable_static_storage_base<Variant, bytes, memcount>,
-    movable_static_storage_base<Variant, bytes, memcount>
-  >;
-
-  template <class Variant, size_t bytes, size_t memcount>
   using autotrivial_static_storage_base_t = std::conditional_t<
     std::is_trivially_destructible_v<Variant>,
     static_storage_base<Variant, bytes, memcount>,
-    autocopyable_static_storage_base_t<Variant, bytes, memcount>
+    destructible_static_storage_base<Variant, bytes, memcount>
   >;
-
-  // Make sure our trivial destructibility is going to work.
-  static_assert(std::is_trivially_destructible_v<autotrivial_static_storage_base_t<std::variant<int>, 8, 2>>);
 
   template <size_t max_bytes, size_t memcount>
   struct static_storage_context {
@@ -398,67 +454,6 @@ namespace varvec::storage {
         using autotrivial_static_storage_base_t<Variant, max_bytes, memcount>::autotrivial_static_storage_base_t;
         using autotrivial_static_storage_base_t<Variant, max_bytes, memcount>::operator [];
     };
-  };
-
-  template <class Variant>
-  struct movable_dynamic_storage_base : dynamic_storage_base<Variant> {
-    movable_dynamic_storage_base() = default;
-    movable_dynamic_storage_base(movable_dynamic_storage_base const&) = delete;
-
-    // FIXME: Make noexcept conditional
-    movable_dynamic_storage_base(movable_dynamic_storage_base&& other) noexcept :
-      dynamic_storage_base<Variant>(std::move(other))
-    {
-      other.bytes = 0;
-      other.count = 0;
-      other.offset = 0;
-    }
-
-    ~movable_dynamic_storage_base() noexcept {
-      while (this->count) {
-        auto const curr_count = --this->count;
-        auto const curr_type = this->meta[curr_count].type;
-        auto const curr_offset = this->meta[curr_count].offset;
-        auto* const curr_ptr = this->get_data() + curr_offset;
-        get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
-          value->~T();
-        });
-      }
-    }
-
-    using dynamic_storage_base<Variant>::operator [];
-  };
-
-  template <class Variant>
-  struct copyable_dynamic_storage_base : movable_dynamic_storage_base<Variant> {
-    using movable_dynamic_storage_base<Variant>::movable_dynamic_storage_base;
-
-    copyable_dynamic_storage_base(copyable_dynamic_storage_base const& other) :
-      movable_dynamic_storage_base<Variant>()
-    {
-      // Copy state
-      this->count = other.count;
-      this->offset = other.offset;
-      this->meta = other.meta;
-
-      // Copy data
-      copy_storage<Variant>(this->count, this->meta, this->get_data(), other.get_data());
-    }
-
-    using movable_dynamic_storage_base<Variant>::operator [];
-  };
-
-  template <class Variant>
-  using autocopyable_dynamic_storage_base_t = std::conditional_t<
-    std::is_copy_constructible_v<Variant>,
-    copyable_dynamic_storage_base<Variant>,
-    movable_dynamic_storage_base<Variant>
-  >;
-
-  template <class Variant>
-  struct dynamic_storage : public autocopyable_dynamic_storage_base_t<Variant> {
-    using autocopyable_dynamic_storage_base_t<Variant>::autocopyable_dynamic_storage_base_t;
-    using autocopyable_dynamic_storage_base_t<Variant>::operator [];
   };
 
 }
@@ -579,9 +574,7 @@ namespace varvec {
 
     public:
 
-      using value_type = Variant<
-        typename decltype(meta::copyable_type_for<Types>())::type...
-      >;
+      using value_type = Variant<meta::copyable_type_for_t<Types>...>;
       using size_type = size_t;
       using difference_type = std::ptrdiff_t;
       using iterator = basic_variable_iterator<Storage, Variant, Types...>;
@@ -589,6 +582,21 @@ namespace varvec {
 
       using logical_type = Variant<Types...>;
       using storage_type = Storage<logical_type>;
+
+      // FIXME: Handle noexcept
+      basic_variable_vector() {}
+
+      // FIXME: Handle noexcept
+      basic_variable_vector(basic_variable_vector const& other)
+        requires (std::copyable<Types> && ...) : impl(other.impl)
+      {}
+
+      // FIXME: Handle noexcept
+      basic_variable_vector(basic_variable_vector&& other) noexcept :
+        impl(std::move(other.impl))
+      {}
+
+      ~basic_variable_vector() = default;
 
       // FIXME: Handle noexcept
       template <class ValueType>
@@ -605,7 +613,12 @@ namespace varvec {
           !std::is_same_v<std::decay_t<ValueType>, logical_type>
       )
       void push_back(ValueType&& val) {
-        using stored_type = std::decay_t<ValueType>;
+        // XXX: It's REALLY difficult to get overload resolution here to work
+        // the way we'd want. This implementation is based on the converting constructor
+        // constraint rules added to the standard for std::variant in C++20.
+        // For details, check paper P0608R3.
+        using stored_type = meta::fuzzy_type_match_t<ValueType, Types...>;
+
         auto& offset = impl.offset;
         auto* const base_ptr = impl.get_data() + offset;
         auto* data_ptr = base_ptr;
@@ -637,18 +650,6 @@ namespace varvec {
         impl.incr_offset(required_bytes);
       }
 
-      // FIXME: Handle noexcept
-      value_type operator [](size_type index) const {
-        assert(index < size());
-        auto const& meta = impl.meta[index];
-        auto* const curr_ptr = impl.get_data() + meta.offset;
-        return storage::get_aligned_ptr_for(meta.type, curr_ptr,
-            meta::identity<logical_type> {}, [] <class T> (T* ptr) -> value_type {
-          if constexpr (std::copyable<T>) return *ptr;
-          else return ptr;
-        });
-      }
-
       template <class Func>
       requires std::conjunction_v<std::is_invocable<Func, Types&>...>
       decltype(auto) visit_at(size_type index, Func&& callback)
@@ -661,6 +662,37 @@ namespace varvec {
             meta::identity<logical_type> {}, [&] <class T> (T* ptr) -> decltype(auto) {
           return std::forward<Func>(callback)(*ptr);
         });
+      }
+
+      // FIXME: Handle noexcept
+      value_type operator [](size_type index) const {
+        assert(index < size());
+        auto const& meta = impl.meta[index];
+        auto* const curr_ptr = impl.get_data() + meta.offset;
+        return storage::get_aligned_ptr_for(meta.type, curr_ptr,
+            meta::identity<logical_type> {}, [] <class T> (T* ptr) -> value_type {
+          if constexpr (std::copyable<T>) return *ptr;
+          else return ptr;
+        });
+      }
+
+      basic_variable_vector& operator =(basic_variable_vector const& other)
+        requires (std::copyable<Types> && ...)
+      {
+        if (&other == this) {
+          return *this;
+        }
+        auto tmp {other};
+        *this = std::move(tmp);
+        return *this;
+      }
+
+      basic_variable_vector& operator =(basic_variable_vector&& other) noexcept {
+        if (&other == this) {
+          return *this;
+        }
+        impl = std::move(other.impl);
+        return *this;
       }
 
       // FIXME: Handle noexcept
@@ -698,6 +730,17 @@ namespace varvec {
     private:
 
       storage_type impl;
+
+      // FIXME: Noexcept
+      // FIXME: We can do better performance wise
+      friend bool operator ==(basic_variable_vector const& lhs, basic_variable_vector const& rhs) noexcept {
+        auto lhs_it = lhs.begin();
+        auto rhs_it = rhs.begin();
+        while (lhs_it != lhs.end() && rhs_it != rhs.end()) {
+          if (*lhs_it++ != *rhs_it++) return false;
+        }
+        return lhs_it == lhs.end() && rhs_it == rhs.end();
+      }
 
   };
 
