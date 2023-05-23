@@ -52,6 +52,23 @@ namespace varvec::meta {
     return std::min({sizeof(Ts)...});
   }
 
+  template <size_t num>
+  constexpr auto smallest_type_for() {
+    if constexpr (num <= std::numeric_limits<uint8_t>::max()) {
+      return meta::identity<uint8_t> {};
+    } else if constexpr (num <= std::numeric_limits<uint16_t>::max()) {
+      return meta::identity<uint16_t> {};
+    } else if constexpr (num <= std::numeric_limits<uint32_t>::max()) {
+      return meta::identity<uint32_t> {};
+    } else {
+      static_assert(num <= std::numeric_limits<uint64_t>::max());
+      return meta::identity<uint64_t> {};
+    }
+  }
+
+  template <size_t num>
+  using smallest_type_for_t = typename decltype(smallest_type_for<num>())::type;
+
   template <class... Ts>
   struct simulated_overload_resolution_impl {
     identity<void> operator ()(...) const;
@@ -66,8 +83,10 @@ namespace varvec::meta {
     // We're trying to solve the problem of std::variant<bool, std::string> {"hello"}
     // selecting its type as "bool". This is the behavior in C++17, but in C++20 the
     // wording around the variant converting constructor changed.
+    //
     // In C++17 it's supposed to select types as-if performing overload resolution for
     // the same, but this prefers bool over std::string in the above example.
+    //
     // In C++20 this was changed so that it still runs overload resolution, but first
     // filters out those types for which the expression "U u[] = {std::forward<T>(t)};"
     // isn't valid (assuming T is the incoming type and U is the potential conversion.
@@ -211,7 +230,7 @@ namespace varvec::storage {
     });
   }
 
-  // FIXME: Make noexcept conditional
+  // Takes care of element-wise move operations for a packed buffer.
   template <class Variant, class Storage, class Metadata>
   constexpr auto move_storage(size_t count, Metadata const& meta, Storage* dest, Storage* src) noexcept {
     for (size_t i = 0; i < count; ++i) {
@@ -219,7 +238,11 @@ namespace varvec::storage {
       auto const offset = meta[i].offset;
       get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
         get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
-          if constexpr (std::is_same_v<S, D>) {
+          constexpr bool types_match = std::is_same_v<S, D>;
+
+          if constexpr (types_match && std::is_trivially_copyable_v<D>) {
+            memcpy(destptr, srcptr, sizeof(D));
+          } else if constexpr (types_match) {
             new(destptr) D(std::move(*srcptr));
           } else {
             __builtin_unreachable();
@@ -229,6 +252,7 @@ namespace varvec::storage {
     }
   }
 
+  // Takes care of element-wise copy operations for a packed buffer.
   template <class Variant, class Storage, class Metadata>
   constexpr auto copy_storage(size_t count, Metadata const& meta, Storage* dest, Storage const* src) noexcept {
     for (size_t i = 0; i < count; ++i) {
@@ -250,16 +274,19 @@ namespace varvec::storage {
     }
   }
 
+  // Holds buffer metadata for an individual vector element
   template <class OffsetType>
   struct storage_metadata {
     uint8_t type;
     OffsetType offset;
   };
 
+  // Base class for statically sized buffer storage.
   template <class Variant, size_t bytes, size_t memcount>
   struct static_storage_base {
 
     using variant_type = Variant;
+    using packed_size_type = meta::smallest_type_for_t<std::max({bytes, memcount})>;
 
     static constexpr auto start_size = memcount;
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
@@ -289,7 +316,9 @@ namespace varvec::storage {
       offset(other.offset),
       meta(other.meta)
     {
-      move_storage(count, meta, get_data(), other.get_data());
+      other.count = 0;
+      other.offset = 0;
+      move_storage<Variant>(count, meta, get_data(), other.get_data());
     }
 
     ~static_storage_base() = default;
@@ -323,16 +352,21 @@ namespace varvec::storage {
       else return false;
     }
 
-    // FIXME: Make these sizes configurable
-    uint16_t count;
-    uint16_t offset;
-    std::array<storage_metadata<uint16_t>, memcount> meta;
+    packed_size_type count;
+    packed_size_type offset;
+    std::array<storage_metadata<packed_size_type>, memcount> meta;
     storage_type<Variant, bytes> data;
 
   };
 
+  // Class used for statically sized storage that has at least one non-trivial destructor.
   template <class Variant, size_t bytes, size_t memcount>
   struct destructible_static_storage_base : static_storage_base<Variant, bytes, memcount> {
+    using static_storage_base<Variant, bytes, memcount>::static_storage_base;
+
+    destructible_static_storage_base(destructible_static_storage_base const&) = default;
+    destructible_static_storage_base(destructible_static_storage_base&&) = default;
+
     ~destructible_static_storage_base() noexcept {
       while (this->count) {
         auto const curr_count = --this->count;
@@ -348,6 +382,7 @@ namespace varvec::storage {
     using static_storage_base<Variant, bytes, memcount>::operator [];
   };
 
+  // Base class for dynamically sized buffer storage.
   template <class Variant>
   struct dynamic_storage {
 
@@ -380,9 +415,9 @@ namespace varvec::storage {
       meta(std::move(other.meta)),
       data(std::move(other.data))
     {
-      bytes = 0;
-      count = 0;
-      offset = 0;
+      other.bytes = 0;
+      other.count = 0;
+      other.offset = 0;
     }
 
     ~dynamic_storage() noexcept {
@@ -440,20 +475,16 @@ namespace varvec::storage {
 
   };
 
-  template <class Variant, size_t bytes, size_t memcount>
-  using autotrivial_static_storage_base_t = std::conditional_t<
-    std::is_trivially_destructible_v<Variant>,
-    static_storage_base<Variant, bytes, memcount>,
-    destructible_static_storage_base<Variant, bytes, memcount>
-  >;
-
+  // Surrounding "context" type is necessary to adapt the template signature
+  // of the static storage types to get a consistent arity.
   template <size_t max_bytes, size_t memcount>
   struct static_storage_context {
     template <class Variant>
-    struct static_storage : public autotrivial_static_storage_base_t<Variant, max_bytes, memcount> {
-        using autotrivial_static_storage_base_t<Variant, max_bytes, memcount>::autotrivial_static_storage_base_t;
-        using autotrivial_static_storage_base_t<Variant, max_bytes, memcount>::operator [];
-    };
+    using static_storage = std::conditional_t<
+      std::is_trivially_destructible_v<Variant>,
+      static_storage_base<Variant, max_bytes, memcount>,
+      destructible_static_storage_base<Variant, max_bytes, memcount>
+    >;
   };
 
 }
@@ -513,15 +544,15 @@ namespace varvec {
         return *this;
       }
 
-      basic_variable_iterator operator ++(int) const noexcept {
+      basic_variable_iterator operator ++(int) noexcept {
         auto tmp {*this};
-        ++tmp;
+        ++idx;
         return tmp;
       }
 
-      basic_variable_iterator operator --(int) const noexcept {
+      basic_variable_iterator operator --(int) noexcept {
         auto tmp {*this};
-        --tmp;
+        --idx;
         return tmp;
       }
 
@@ -599,6 +630,7 @@ namespace varvec {
       ~basic_variable_vector() = default;
 
       // FIXME: Handle noexcept
+      // Function handles forwarding in a std::variant of the right types.
       template <class ValueType>
       requires std::is_same_v<std::decay_t<ValueType>, logical_type>
       void push_back(ValueType&& val) {
@@ -606,6 +638,7 @@ namespace varvec {
       }
 
       // FIXME: Handle noexcept
+      // Function handles forwarding in any type that's convertible to our variant type.
       template <class ValueType>
       requires (
           std::is_constructible_v<logical_type, ValueType>
@@ -624,7 +657,7 @@ namespace varvec {
         auto* data_ptr = base_ptr;
 
         // Figure out how much space we'll need.
-        auto const required_bytes = sizeof(val);
+        auto const required_bytes = sizeof(stored_type);
         if constexpr (!std::is_trivially_copyable_v<stored_type>) {
           data_ptr = storage::realign_for_type<stored_type>(data_ptr);
         }
@@ -650,6 +683,8 @@ namespace varvec {
         impl.incr_offset(required_bytes);
       }
 
+      // Function allows std::visit style visitation syntax at a given index.
+      // Useful because it's the only call that allows mutation.
       template <class Func>
       requires std::conjunction_v<std::is_invocable<Func, Types&>...>
       decltype(auto) visit_at(size_type index, Func&& callback)
@@ -665,6 +700,7 @@ namespace varvec {
       }
 
       // FIXME: Handle noexcept
+      // Subscript operator. Creates a temporary variant to return.
       value_type operator [](size_type index) const {
         assert(index < size());
         auto const& meta = impl.meta[index];
@@ -744,6 +780,8 @@ namespace varvec {
 
   };
 
+  // One of the two main types of the library.
+  // A statically sized, packed, variant vector.
   template <size_t max_bytes, size_t memcount, std::movable... Types>
   using static_vector = basic_variable_vector<
     storage::static_storage_context<max_bytes, memcount>::template static_storage,
@@ -751,6 +789,8 @@ namespace varvec {
     Types...
   >;
 
+  // One of the two main types of the library.
+  // A dynamically sized, packed, variant vector.
   template <std::movable... Types>
   using vector = basic_variable_vector<
     storage::dynamic_storage,
