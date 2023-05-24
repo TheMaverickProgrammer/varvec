@@ -430,7 +430,7 @@ namespace varvec::storage {
 
     dynamic_storage() :
       meta(std::ceil(start_size / (double) meta::min_size_of(meta::identity<Variant> {}))),
-      data(new (std::align_val_t(max_alignment)) uint8_t[start_size])
+      data(new (std::align_val_t(max_alignment)) uint8_t[start_size], aligned_delete)
     {}
 
     dynamic_storage(dynamic_storage const& other)
@@ -440,7 +440,7 @@ namespace varvec::storage {
       count(other.count),
       offset(other.offset),
       meta(other.meta),
-      data(new (std::align_val_t(max_alignment)) uint8_t[bytes])
+      data(new (std::align_val_t(max_alignment)) uint8_t[bytes], aligned_delete)
     {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         memcpy(get_data(), other.get_data(), bytes);
@@ -489,9 +489,15 @@ namespace varvec::storage {
       offset += count;
     }
 
+    static void aligned_delete(uint8_t* ptr) noexcept {
+      operator delete[] (ptr, std::align_val_t(max_alignment));
+    }
+
     uint8_t* resize(size_t newsize) {
       // Align some storage
-      std::unique_ptr<uint8_t[]> newdata(new (std::align_val_t(max_alignment)) uint8_t[newsize]);
+      std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> newdata {
+        new (std::align_val_t(max_alignment)) uint8_t[newsize], aligned_delete
+      };
 
       // Strong exception guarantee. Don't throw from moves
       if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
@@ -519,7 +525,7 @@ namespace varvec::storage {
     size_t count {0};
     size_t offset {0};
     std::vector<storage_metadata<size_t>> meta;
-    std::unique_ptr<uint8_t[]> data;
+    std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> data;
 
   };
 
