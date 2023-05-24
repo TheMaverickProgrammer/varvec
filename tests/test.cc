@@ -94,7 +94,7 @@ TEST_CASE("container properties", "[varvec tests]") {
       });
       REQUIRE(v[1] == val {5});
       REQUIRE(*it++ == val {5});
-      v.visit_at(1, varvec::meta::overload {
+      v.visit_at(v.begin() + 1, varvec::meta::overload {
         [] (int& val) { REQUIRE(val == 5); },
         [] (auto&) { REQUIRE(false); }
       });
@@ -106,7 +106,7 @@ TEST_CASE("container properties", "[varvec tests]") {
       });
       REQUIRE(v[3] == val {"hello world"});
       REQUIRE(*it++ == val {"hello world"});
-      v.visit_at(3, varvec::meta::overload {
+      v.visit_at(v.end() - 1, varvec::meta::overload {
         [] (std::string& val) { REQUIRE(val == "hello world"); },
         [] (auto&) { REQUIRE(false); }
       });
@@ -125,6 +125,13 @@ TEST_CASE("container properties", "[varvec tests]") {
     if constexpr (std::copyable<V>) {
       auto copy = vec;
       validate(copy);
+
+      copy.pop_back();
+      copy.pop_back();
+      copy.pop_back();
+      copy.pop_back();
+      REQUIRE(copy.empty());
+      REQUIRE(copy.begin() == copy.end());
     }
   };
   asserts(varvec::meta::identity<copyable_vector> {});

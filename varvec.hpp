@@ -335,7 +335,11 @@ namespace varvec::storage {
       offset(other.offset),
       meta(other.meta)
     {
-      copy_storage<Variant>(count, meta, get_data(), other.get_data());
+      if constexpr (std::is_trivially_copyable_v<Variant>) {
+        data = other.data;
+      } else {
+        copy_storage<Variant>(count, meta, get_data(), other.get_data());
+      }
     }
 
     static_storage_base(static_storage_base&& other)
@@ -345,9 +349,13 @@ namespace varvec::storage {
       offset(other.offset),
       meta(other.meta)
     {
+      if constexpr (std::is_trivially_copyable_v<Variant>) {
+        data = other.data;
+      } else {
+        move_storage<Variant>(count, meta, get_data(), other.get_data());
+      }
       other.count = 0;
       other.offset = 0;
-      move_storage<Variant>(count, meta, get_data(), other.get_data());
     }
 
     ~static_storage_base() = default;
@@ -434,7 +442,11 @@ namespace varvec::storage {
       meta(other.meta),
       data(new (std::align_val_t(max_alignment)) uint8_t[bytes])
     {
-      copy_storage<Variant>(count, meta, get_data(), other.get_data());
+      if constexpr (std::is_trivially_copyable_v<Variant>) {
+        memcpy(get_data(), other.get_data(), bytes);
+      } else {
+        copy_storage<Variant>(count, meta, get_data(), other.get_data());
+      }
     }
 
     dynamic_storage(dynamic_storage&& other) noexcept :
@@ -740,7 +752,7 @@ namespace varvec {
       // Function allows std::visit style visitation syntax at a given index.
       // Useful because it's the only call that allows mutation.
       template <class Func>
-      requires std::conjunction_v<std::is_invocable<Func, Types&>...>
+      requires (std::is_invocable_v<Func, Types&> && ...)
       decltype(auto) visit_at(size_type index, Func&& callback)
         noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
@@ -750,6 +762,25 @@ namespace varvec {
         return storage::get_aligned_ptr_for(meta.type, curr_ptr,
             meta::identity<logical_type> {}, [&] <class T> (T* ptr) -> decltype(auto) {
           return std::forward<Func>(callback)(*ptr);
+        });
+      }
+
+      template <class Func>
+      requires (std::is_invocable_v<Func, Types&> && ...)
+      decltype(auto) visit_at(iterator it, Func&& callback)
+        noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
+      {
+        return visit_at(it.idx, std::forward<Func>(callback));
+      }
+
+
+      void pop_back() noexcept {
+        assert(size());
+        auto const& meta = impl.meta[--impl.count];
+        auto* const curr_ptr = impl.get_data() + meta.offset;
+        storage::get_aligned_ptr_for(meta.type, curr_ptr,
+            meta::identity<logical_type> {}, [] <class T> (T* ptr) {
+          ptr->~T();
         });
       }
 
