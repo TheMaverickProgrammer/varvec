@@ -8,7 +8,7 @@ before_install:
   - git clone https://github.com/catchorg/Catch2.git
   - cd Catch2
   - CC=/usr/bin/clang-14 CXX="/usr/bin/clang++-14 -stdlib=libc++" cmake -Bbuild -H. -DBUILD_TESTING=OFF
-  - sudo cmake --build build/ --target install
+  - sudo cmake --build build/ -j $(nproc) --target install
   - cd ..
 
 script:
