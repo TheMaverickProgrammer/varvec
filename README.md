@@ -1,5 +1,7 @@
 # Variable Vectors
 
+[![Build Status](https://app.travis-ci.com/Cfretz244/varvec.svg?branch=master)](https://app.travis-ci.com/Cfretz244/varvec)
+
 The idea behind this repository is to implement a set of "variable vector" types,
 built on top of `std::variant` machinery, allowing a user to store heterogenous
 types in a `std::vector`-like container, but while using a minimal amount of memory
