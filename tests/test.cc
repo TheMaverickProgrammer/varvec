@@ -51,7 +51,7 @@ static_assert(
   std::movable<dynamic_movable_vector>
 );
 
-TEST_CASE("basic properties", "[varvec tests]") {
+TEST_CASE("construction properties", "[varvec tests]") {
   auto asserts = [] <class V> (varvec::meta::identity<V>) {
     V vec;
     REQUIRE(vec.size() == 0);

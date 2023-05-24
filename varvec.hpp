@@ -37,6 +37,9 @@ namespace varvec::meta {
   template <class... Funcs>
   overload(Funcs...) -> overload<Funcs...>;
 
+  template <class Func, std::movable... Types>
+  constexpr bool nothrow_visitor_v = (std::is_nothrow_invocable_v<Func, Types> && ...);
+
   template <template <class...> class Container, class... Ts>
   constexpr auto max_alignment_of(identity<Container<Ts...>>) {
     return std::max({alignof(Ts)...});
@@ -76,16 +79,21 @@ namespace varvec::meta {
 
   template <class T, class... Ts>
   struct simulated_overload_resolution_impl<T, Ts...> : simulated_overload_resolution_impl<Ts...> {
+    // I don't really understand why this needs to be here,
+    // but clang won't eat it otherwise.
     template <class U>
     using array_type = U[1];
 
     // XXX: The requires clause here is stupidly non-obvious.
+    // Thankfully we don't have to do this as an enable_if SFINAE in C++20
+    //
     // We're trying to solve the problem of std::variant<bool, std::string> {"hello"}
-    // selecting its type as "bool". This is the behavior in C++17, but in C++20 the
-    // wording around the variant converting constructor changed.
+    // selecting its type as "bool". This is extremely obnoxious (string converted to 1),
+    // and is the behavior in C++17, but in C++20 the wording around the variant converting
+    // constructor changed.
     //
     // In C++17 it's supposed to select types as-if performing overload resolution for
-    // the same, but this prefers bool over std::string in the above example.
+    // the same, but this prefers bool over std::string in the above example, which sucks.
     //
     // In C++20 this was changed so that it still runs overload resolution, but first
     // filters out those types for which the expression "U u[] = {std::forward<T>(t)};"
@@ -93,12 +101,22 @@ namespace varvec::meta {
     // 
     // Somehow this manages to fix the issue in most cases, and gets std::string chosen.
     template <class U>
-    requires requires { array_type<T>{std::declval<U>()}; }
+    static constexpr bool precisely_convertible_v = requires {
+      array_type<T>{std::declval<U>()};
+    };
+
+    // Constrained by our precise check above, we declare an overload
+    template <class U>
+    requires precisely_convertible_v<U>
     identity<T> operator ()(T const&, U const&) const;
 
+    // And inherit all our parent's call operators
     using simulated_overload_resolution_impl<Ts...>::operator ();
   };
 
+  // This type alias, and the struct above, implement the type coversion logic for
+  // basic_variable_vector roughly according to the specification for std::variant's
+  // converting constructor.
   template <class T, class... Ts>
   using fuzzy_type_match_t =
       typename decltype(simulated_overload_resolution_impl<Ts...> {}(std::declval<T>(), std::declval<T>()))::type;
@@ -149,12 +167,12 @@ namespace varvec::storage {
   >;
 
   template <class T>
-  constexpr bool aligned_for_type(void const* ptr) {
+  constexpr bool aligned_for_type(void const* ptr) noexcept {
     return !(std::bit_cast<std::uintptr_t>(ptr) & (alignof(T) - 1));
   }
 
   template <class T, class P>
-  constexpr P* realign_for_type(P* ptr) {
+  constexpr P* realign_for_type(P* ptr) noexcept {
     auto const alignment = alignof(T);
     auto const offset = std::bit_cast<std::uintptr_t>(ptr);
     return std::bit_cast<P*>(((offset + (alignment - 1)) & ~(alignment - 1)));
@@ -167,7 +185,9 @@ namespace varvec::storage {
   template <class Storage,
            template <std::movable...> class Variant, std::movable... Types, class Func>
   constexpr decltype(auto) get_typed_ptr_for(uint8_t curr_type,
-      Storage* curr_data, meta::identity<Variant<Types...>>, Func&& callback) {
+      Storage* curr_data, meta::identity<Variant<Types...>>, Func&& callback)
+    noexcept(meta::nothrow_visitor_v<Func, Types...>)
+  {
     // Lol. Not sure this is better than the old way
     auto recurse = [&] <class T, class... Ts, class Cont, size_t idx, size_t... idxs>
       (Cont&& cont, std::index_sequence<idx, idxs...>) -> decltype(auto) {
@@ -178,7 +198,7 @@ namespace varvec::storage {
       // Since we're using an index sequence generated off our type list,
       // we're guaranteed to eventually find a match.
       if constexpr (sizeof...(Ts)) {
-        // Recursive, generic, explicitly parameterized lambdas are rough to work with.
+        // Recursive, generic, explicitly parameterized lambdas are obnoxious to work with.
         return cont.template operator ()<Ts...>(cont, std::index_sequence<idxs...> {});
       } else {
         __builtin_unreachable();
@@ -195,7 +215,9 @@ namespace varvec::storage {
   template <class Storage,
            template <std::movable...> class Variant, std::movable... Types, class Func>
   constexpr decltype(auto) get_aligned_ptr_for(uint8_t curr_type,
-      Storage* curr_data, meta::identity<Variant<Types...>> variant, Func&& callback) {
+      Storage* curr_data, meta::identity<Variant<Types...>> variant, Func&& callback)
+    noexcept(meta::nothrow_visitor_v<Func, Types...>)
+  {
     return get_typed_ptr_for(curr_type,
         curr_data, variant, [&] <class T> (T* ptr) {
       if constexpr (std::copyable<T>) {
@@ -232,7 +254,10 @@ namespace varvec::storage {
 
   // Takes care of element-wise move operations for a packed buffer.
   template <class Variant, class Storage, class Metadata>
-  constexpr auto move_storage(size_t count, Metadata const& meta, Storage* dest, Storage* src) noexcept {
+  constexpr auto move_storage(size_t count,
+      Metadata const& meta, Storage* dest, Storage* src)
+    noexcept(std::is_nothrow_move_constructible_v<Variant>)
+  {
     for (size_t i = 0; i < count; ++i) {
       auto const type = meta[i].type;
       auto const offset = meta[i].offset;
@@ -254,7 +279,10 @@ namespace varvec::storage {
 
   // Takes care of element-wise copy operations for a packed buffer.
   template <class Variant, class Storage, class Metadata>
-  constexpr auto copy_storage(size_t count, Metadata const& meta, Storage* dest, Storage const* src) noexcept {
+  constexpr auto copy_storage(size_t count,
+      Metadata const& meta, Storage* dest, Storage const* src)
+    noexcept(std::is_nothrow_copy_constructible_v<Variant>)
+  {
     for (size_t i = 0; i < count; ++i) {
       auto const type = meta[i].type;
       auto const offset = meta[i].offset;
@@ -299,8 +327,8 @@ namespace varvec::storage {
       }
     }
 
-    // FIXME: Handle noexcept
     static_storage_base(static_storage_base const& other)
+      noexcept(std::is_nothrow_copy_constructible_v<Variant>)
       requires std::copyable<Variant>
     :
       count(other.count),
@@ -310,8 +338,9 @@ namespace varvec::storage {
       copy_storage<Variant>(count, meta, get_data(), other.get_data());
     }
 
-    // FIXME: Handle noexcept
-    static_storage_base(static_storage_base&& other) noexcept :
+    static_storage_base(static_storage_base&& other)
+      noexcept(std::is_nothrow_move_constructible_v<Variant>)
+    :
       count(other.count),
       offset(other.offset),
       meta(other.meta)
@@ -448,11 +477,18 @@ namespace varvec::storage {
       offset += count;
     }
 
-    // FIXME: Propgate noexcept
     uint8_t* resize(size_t newsize) {
-      // FIXME: Add logic to fall back on copy constructor if move constructor is throwing
+      // Align some storage
       std::unique_ptr<uint8_t[]> newdata(new (std::align_val_t(max_alignment)) uint8_t[newsize]);
-      move_storage<Variant>(count, meta, newdata.get(), data.get());
+
+      // Strong exception guarantee. Don't throw from moves
+      if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
+        move_storage<Variant>(count, meta, newdata.get(), data.get());
+      } else {
+        copy_storage<Variant>(count, meta, newdata.get(), data.get());
+      }
+
+      // Update
       data = std::move(newdata);
       bytes = newsize;
       meta.resize(std::ceil(bytes / (double) meta::min_size_of(meta::identity<Variant> {})));
@@ -528,8 +564,9 @@ namespace varvec {
         return *this;
       }
 
-      // FIXME: Handle noexcept
-      value_type operator *() const {
+      value_type operator *() const
+        noexcept(std::is_nothrow_copy_constructible_v<value_type>)
+      {
         assert(storage);
         return (*storage)[idx];
       }
@@ -614,30 +651,44 @@ namespace varvec {
       using logical_type = Variant<Types...>;
       using storage_type = Storage<logical_type>;
 
-      // FIXME: Handle noexcept
-      basic_variable_vector() {}
+      static constexpr bool nothrow_value_copyable =
+        std::is_nothrow_copy_constructible_v<value_type>;
+      static constexpr bool nothrow_logical_copyable =
+        std::is_nothrow_copy_constructible_v<logical_type>;
 
-      // FIXME: Handle noexcept
-      basic_variable_vector(basic_variable_vector const& other)
-        requires (std::copyable<Types> && ...) : impl(other.impl)
+      static constexpr bool nothrow_value_movable =
+        std::is_nothrow_move_constructible_v<value_type>;
+      static constexpr bool nothrow_logical_movable =
+        std::is_nothrow_move_constructible_v<logical_type>;
+
+      basic_variable_vector()
+        noexcept(std::is_nothrow_constructible_v<storage_type>)
       {}
 
-      // FIXME: Handle noexcept
-      basic_variable_vector(basic_variable_vector&& other) noexcept :
+      basic_variable_vector(basic_variable_vector const& other)
+        noexcept(nothrow_logical_copyable)
+        requires (std::copyable<Types> && ...)
+      :
+        impl(other.impl)
+      {}
+
+      basic_variable_vector(basic_variable_vector&& other)
+        noexcept(nothrow_logical_movable)
+      :
         impl(std::move(other.impl))
       {}
 
       ~basic_variable_vector() = default;
 
-      // FIXME: Handle noexcept
       // Function handles forwarding in a std::variant of the right types.
       template <class ValueType>
       requires std::is_same_v<std::decay_t<ValueType>, logical_type>
-      void push_back(ValueType&& val) {
+      void push_back(ValueType&& val)
+        noexcept(std::is_nothrow_constructible_v<std::decay_t<ValueType>, ValueType>)
+      {
         std::visit([&] <class T> (T&& arg) { push_back(std::forward<T>(arg)); }, std::forward<ValueType>(val));
       }
 
-      // FIXME: Handle noexcept
       // Function handles forwarding in any type that's convertible to our variant type.
       template <class ValueType>
       requires (
@@ -645,7 +696,9 @@ namespace varvec {
           &&
           !std::is_same_v<std::decay_t<ValueType>, logical_type>
       )
-      void push_back(ValueType&& val) {
+      void push_back(ValueType&& val)
+        noexcept(std::is_nothrow_constructible_v<std::decay_t<ValueType>, ValueType>)
+      {
         // XXX: It's REALLY difficult to get overload resolution here to work
         // the way we'd want. This implementation is based on the converting constructor
         // constraint rules added to the standard for std::variant in C++20.
@@ -665,7 +718,7 @@ namespace varvec {
 
         // Check if we have it.
         while (!impl.has_space(required_bytes + alignment_bytes)) {
-          // Rethink this
+          // FIXME: Rethink grow strategy
           // Will throw for static vector
           data_ptr = impl.resize(impl.size() * 2);
         }
@@ -676,6 +729,7 @@ namespace varvec {
           // May copy to a misaligned address
           memcpy(data_ptr, &val, sizeof(stored_type));
         } else {
+          // Will align at native requirements
           new(data_ptr) stored_type(std::forward<ValueType>(val));
         }
         impl.meta[curr_count].type = meta::index_of_v<stored_type, Types...>;
@@ -688,7 +742,7 @@ namespace varvec {
       template <class Func>
       requires std::conjunction_v<std::is_invocable<Func, Types&>...>
       decltype(auto) visit_at(size_type index, Func&& callback)
-        noexcept(std::conjunction_v<std::is_nothrow_invocable<Func, Types&>...>)
+        noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
         assert(index < size());
         auto const& meta = impl.meta[index];
@@ -699,9 +753,8 @@ namespace varvec {
         });
       }
 
-      // FIXME: Handle noexcept
       // Subscript operator. Creates a temporary variant to return.
-      value_type operator [](size_type index) const {
+      value_type operator [](size_type index) const noexcept(nothrow_value_copyable) {
         assert(index < size());
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
@@ -713,6 +766,7 @@ namespace varvec {
       }
 
       basic_variable_vector& operator =(basic_variable_vector const& other)
+        noexcept(nothrow_logical_copyable)
         requires (std::copyable<Types> && ...)
       {
         if (&other == this) {
@@ -723,7 +777,9 @@ namespace varvec {
         return *this;
       }
 
-      basic_variable_vector& operator =(basic_variable_vector&& other) noexcept {
+      basic_variable_vector& operator =(basic_variable_vector&& other)
+        noexcept(nothrow_logical_movable)
+      {
         if (&other == this) {
           return *this;
         }
@@ -731,14 +787,12 @@ namespace varvec {
         return *this;
       }
 
-      // FIXME: Handle noexcept
-      value_type front() const {
+      value_type front() const noexcept(nothrow_value_copyable) {
         assert(impl.count);
         return (*this)[0];
       }
 
-      // FIXME: Handle noexcept
-      value_type back() const {
+      value_type back() const noexcept(nothrow_value_copyable) {
         assert(impl.count);
         return (*this)[impl.count - 1];
       }
@@ -767,9 +821,10 @@ namespace varvec {
 
       storage_type impl;
 
-      // FIXME: Noexcept
       // FIXME: We can do better performance wise
-      friend bool operator ==(basic_variable_vector const& lhs, basic_variable_vector const& rhs) noexcept {
+      friend bool operator ==(basic_variable_vector const& lhs, basic_variable_vector const& rhs)
+        noexcept(noexcept(*lhs.begin() != *rhs.begin()))
+      {
         auto lhs_it = lhs.begin();
         auto rhs_it = rhs.begin();
         while (lhs_it != lhs.end() && rhs_it != rhs.end()) {
