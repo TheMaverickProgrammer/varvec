@@ -178,7 +178,52 @@ TEST_CASE("move-only properties", "varvec tests") {
 
     auto moved = std::move(vec);
     validate(moved);
+    moved.pop_back();
+    moved.pop_back();
+    moved.pop_back();
+    moved.pop_back();
+    REQUIRE(moved.empty());
+    REQUIRE(moved.begin() == moved.end());
   };
   asserts(varvec::meta::identity<movable_vector> {});
+  asserts(varvec::meta::identity<dynamic_movable_vector> {});
+}
+
+TEST_CASE("mutation", "varvec tests") {
+  auto asserts = [] <class V> (varvec::meta::identity<V>) {
+    using val = typename V::value_type;
+    V vec;
+    vec.push_back(true);
+    vec.push_back(5);
+    vec.push_back((float) 3.5);
+    vec.push_back("hello world");
+
+    vec.visit_at(3, varvec::meta::overload {
+      [] (std::string& msg) { msg = "hello life"; },
+      [] (auto&) { REQUIRE(false); }
+    });
+    REQUIRE(std::get<std::string>(vec[3]) == "hello life");
+
+    vec.visit_at(2, varvec::meta::overload {
+      [] (float& msg) { msg = 42.0; },
+      [] (auto&) { REQUIRE(false); }
+    });
+    REQUIRE(std::get<float>(vec[2]) == 42.0);
+
+    vec.visit_at(1, varvec::meta::overload {
+      [] (int& msg) { msg = 1337; },
+      [] (auto&) { REQUIRE(false); }
+    });
+    REQUIRE(std::get<int>(vec[1]) == 1337);
+
+    vec.visit_at(0, varvec::meta::overload {
+      [] (bool& msg) { msg = false; },
+      [] (auto&) { REQUIRE(false); }
+    });
+    REQUIRE(std::get<bool>(vec[0]) == 0);
+  };
+  asserts(varvec::meta::identity<copyable_vector> {});
+  asserts(varvec::meta::identity<movable_vector> {});
+  asserts(varvec::meta::identity<dynamic_vector> {});
   asserts(varvec::meta::identity<dynamic_movable_vector> {});
 }

@@ -10,11 +10,6 @@
 #include <functional>
 #include <type_traits>
 
-#define DIRTY_MACRO_DECLARE_OPERATOR(op)                                                  \
-  friend bool operator op (variable_iterator const& lhs, variable_iterator const& rhs) {  \
-    return lhs.idx op rhs.idx;                                                            \
-  }
-
 namespace varvec::meta {
 
   template <class T>
@@ -79,7 +74,7 @@ namespace varvec::meta {
 
   template <class T, class... Ts>
   struct simulated_overload_resolution_impl<T, Ts...> : simulated_overload_resolution_impl<Ts...> {
-    // I don't really understand why this needs to be here,
+    // XXX: I don't really understand why this needs to be here,
     // but clang won't eat it otherwise.
     template <class U>
     using array_type = U[1];
@@ -121,6 +116,7 @@ namespace varvec::meta {
   using fuzzy_type_match_t =
       typename decltype(simulated_overload_resolution_impl<Ts...> {}(std::declval<T>(), std::declval<T>()))::type;
 
+  // Redirect move-only types to pointers
   template <class T>
   constexpr auto copyable_type_for() {
     if constexpr (std::copyable<T>) {
@@ -494,13 +490,17 @@ namespace varvec::storage {
     }
 
     uint8_t* resize(size_t newsize) {
+      assert(newsize >= bytes);
+
       // Align some storage
       std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> newdata {
         new (std::align_val_t(max_alignment)) uint8_t[newsize], aligned_delete
       };
 
       // Strong exception guarantee. Don't throw from moves
-      if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
+      if constexpr (std::is_trivially_copyable_v<Variant>) {
+        memcpy(newdata.get(), data.get(), bytes);
+      } else if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
         move_storage<Variant>(count, meta, newdata.get(), data.get());
       } else {
         copy_storage<Variant>(count, meta, newdata.get(), data.get());
