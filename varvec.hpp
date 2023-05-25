@@ -798,27 +798,133 @@ namespace varvec {
       }
 
       // Function allows std::visit style visitation syntax at a given index.
-      // Useful because it's the only call that allows mutation.
+      // Useful because it's the only call that allows universal mutation.
       template <class Func>
       requires (std::is_invocable_v<Func, Types&> && ...)
-      decltype(auto) visit_at(size_type index, Func&& callback)
+      void visit_at(size_type index, Func&& callback)
         noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
         assert(index < size());
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
-        return storage::get_aligned_ptr_for(meta.type, curr_ptr,
-            meta::identity<logical_type> {}, [&] <class T> (T* ptr) -> decltype(auto) {
-          return std::forward<Func>(callback)(*ptr);
+        storage::get_aligned_ptr_for(meta.type, curr_ptr,
+            meta::identity<logical_type> {}, [&] <class T> (T* ptr) {
+          std::forward<Func>(callback)(*ptr);
         });
       }
 
       template <class Func>
       requires (std::is_invocable_v<Func, Types&> && ...)
-      decltype(auto) visit_at(iterator it, Func&& callback)
+      void visit_at(size_type index, Func&& callback) const
         noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
-        return visit_at(it.idx, std::forward<Func>(callback));
+        const_cast<basic_variable_vector*>(this)->visit_at(index, [&] <class T> (T& val) {
+          std::forward<Func>(callback)(const_cast<T const&>(val));
+        });
+      }
+
+      template <class Func>
+      requires (std::is_invocable_v<Func, Types&> && ...)
+      void visit_at(iterator it, Func&& callback)
+        noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
+      {
+        visit_at(it.idx, std::forward<Func>(callback));
+      }
+
+      template <class T>
+      requires (
+        !std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T& get_at(size_type index) & {
+        T* ptr = nullptr;
+        visit_at(index, [&] <class U> (U& val) {
+          if constexpr (std::is_same_v<U, T>) {
+            ptr = &val;
+          } else {
+            throw std::bad_cast();
+          }
+        });
+        return *ptr;
+      }
+
+      template <class T>
+      requires (
+        !std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T& get_at(iterator it) & {
+        return get_at<T>(it);
+      }
+
+      template <class T>
+      requires (
+        !std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T const& get_at(size_type index) const& {
+        return const_cast<basic_variable_vector*>(this)->get_at<T>(index);
+      }
+
+      template <class T>
+      requires (
+        !std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T const& get_at(iterator it) const& {
+        return get_at<T>(it.idx);
+      }
+
+      template <class T>
+      requires (
+        !std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T&& get_at(size_type index) && {
+        return get_at<T>();
+      }
+
+      template <class T>
+      requires (
+        !std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T&& get_at(iterator it) && {
+        return std::move(*this).template get_at<T>(it.idx);
+      }
+
+      template <class T>
+      requires (
+        std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T get_at(size_type index) const {
+        T retval;
+        visit_at(index, [&] <class U> (U const& val) {
+          if constexpr (std::is_same_v<U, T>) {
+            retval = val;
+          } else {
+            throw std::bad_cast();
+          }
+        });
+        return retval;
+      }
+
+      template <class T>
+      requires (
+        std::is_trivially_constructible_v<T>
+        &&
+        (std::is_same_v<T, Types> || ...)
+      )
+      T get_at(iterator it) const {
+        return get_at<T>(it);
       }
 
       void pop_back() noexcept {
