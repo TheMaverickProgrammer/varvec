@@ -1,10 +1,13 @@
 #include <bit>
 #include <new>
-#include <iostream>
-#include <variant>
-#include <string>
+#include <cmath>
 #include <array>
+#include <memory>
+#include <string>
+#include <cstring>
 #include <cassert>
+#include <variant>
+#include <iostream>
 #include <concepts>
 #include <stdexcept>
 #include <functional>
@@ -116,14 +119,34 @@ namespace varvec::meta {
   using fuzzy_type_match_t =
       typename decltype(simulated_overload_resolution_impl<Ts...> {}(std::declval<T>(), std::declval<T>()))::type;
 
-  // Redirect move-only types to pointers
+  // Redirect move-only types to pointers to const
   template <class T>
   constexpr auto copyable_type_for() {
     if constexpr (std::copyable<T>) {
       return meta::identity<T> {};
     } else {
       static_assert(std::movable<T>);
-      return meta::identity<T*> {};
+      // XXX: This SUCKS.
+      //
+      // So here's the problem. The whole point of this library is that the types are stored
+      // in a packed format, and so I can't store them inside of variants. However, operator []
+      // needs a single consistent return type, and so it works with variants.
+      //
+      // Since I can't store the types as variants, I have to construct temporary variants as the
+      // return of operator []. However, this causes problems for move-only types, since the temporary
+      // variant would store it by value and would need a copy.
+      //
+      // I planned to solve this problem by rewriting movable types into a pointer to the type,
+      // and then just return a variant containing a pointer, however, this runs into const-correctness
+      // issues. operator [] needs a const overload, as otherwise a const vector is rather worthless,
+      // and the const version of the operator is forced to return a const pointer since the moveable
+      // type is stored inside of the vector.
+      //
+      // This puts me in the position of needing to either have the const-qualified operator [] return
+      // a different variant type than its mutable counterpart, which seems awful, or always force the
+      // pointer to be const, which seems like a usability headache. The only other option is to
+      // explicitly discard const for the const overload, which seems like a sin.
+      return meta::identity<T const*> {};
     }
   }
 
@@ -164,14 +187,14 @@ namespace varvec::storage {
 
   template <class T>
   constexpr bool aligned_for_type(void const* ptr) noexcept {
-    return !(std::bit_cast<std::uintptr_t>(ptr) & (alignof(T) - 1));
+    return !(reinterpret_cast<std::uintptr_t>(ptr) & (alignof(T) - 1));
   }
 
   template <class T, class P>
   constexpr P* realign_for_type(P* ptr) noexcept {
     auto const alignment = alignof(T);
-    auto const offset = std::bit_cast<std::uintptr_t>(ptr);
-    return std::bit_cast<P*>(((offset + (alignment - 1)) & ~(alignment - 1)));
+    auto const offset = reinterpret_cast<std::uintptr_t>(ptr);
+    return reinterpret_cast<P*>(((offset + (alignment - 1)) & ~(alignment - 1)));
   }
 
   // Given a type index, an object base pointer, a list of variant types, and a generic callback,
@@ -179,7 +202,7 @@ namespace varvec::storage {
   // packed object storage, passing through a pointer to the callback function.
   // The passed pointer is NOT guaranteed to be well aligned for the given type.
   template <class Storage,
-           template <std::movable...> class Variant, std::movable... Types, class Func>
+           template <class...> class Variant, std::movable... Types, class Func>
   constexpr decltype(auto) get_typed_ptr_for(uint8_t curr_type,
       Storage* curr_data, meta::identity<Variant<Types...>>, Func&& callback)
     noexcept(meta::nothrow_visitor_v<Func, Types...>)
@@ -187,8 +210,17 @@ namespace varvec::storage {
     // Lol. Not sure this is better than the old way
     auto recurse = [&] <class T, class... Ts, class Cont, size_t idx, size_t... idxs>
       (Cont&& cont, std::index_sequence<idx, idxs...>) -> decltype(auto) {
+      // Forward const
+      using ptr_type = std::conditional_t<
+        std::is_const_v<Storage>,
+        T const,
+        T
+      >;
+
       // If this is the index for our type, cast the pointer into the proper type and call the callback.
-      if (idx == curr_type) return std::forward<Func>(callback)(std::bit_cast<T*>(curr_data));
+      if (idx == curr_type) {
+        return std::forward<Func>(callback)(reinterpret_cast<ptr_type*>(curr_data));
+      }
 
       // Otherwise recurse.
       // Since we're using an index sequence generated off our type list,
@@ -209,35 +241,45 @@ namespace varvec::storage {
   // packed object storage, passing through a pointer to the callback function.
   // The passed pointer IS guaranteed to be well aligned for the given type.
   template <class Storage,
-           template <std::movable...> class Variant, std::movable... Types, class Func>
+           template <class...> class Variant, std::movable... Types, class Func>
   constexpr decltype(auto) get_aligned_ptr_for(uint8_t curr_type,
       Storage* curr_data, meta::identity<Variant<Types...>> variant, Func&& callback)
     noexcept(meta::nothrow_visitor_v<Func, Types...>)
   {
     return get_typed_ptr_for(curr_type,
         curr_data, variant, [&] <class T> (T* ptr) {
-      if constexpr (std::copyable<T>) {
-        if (!storage::aligned_for_type<T>(ptr)) {
+      using stored_type = std::remove_const_t<T>;
+
+      if constexpr (std::copyable<stored_type>) {
+        if (!storage::aligned_for_type<stored_type>(ptr)) {
           // Propagates changes back if the user changes anything.
           struct change_forwarder {
-            change_forwarder(void* orig, void* tmp) : orig(orig), tmp(tmp) {}
+            using target_type = std::conditional_t<
+              std::is_const_v<T>,
+              void const,
+              void
+            >;
+
+            change_forwarder(target_type* orig, void* tmp) : orig(orig), tmp(tmp) {}
             ~change_forwarder() noexcept {
-              // XXX: Is this worth it? Could just copy
-              if (memcmp(orig, tmp, sizeof(T))) {
-                memcpy(orig, tmp, sizeof(T));
+              if constexpr (!std::is_const_v<target_type>) {
+                // XXX: Is this worth it? Could just copy
+                if (memcmp(orig, tmp, sizeof(stored_type))) {
+                  memcpy(orig, tmp, sizeof(stored_type));
+                }
               }
             }
-            void* orig;
+            target_type* orig;
             void* tmp;
           };
 
           // Only trivially copyable types should ever be misaligned.
-          assert(std::is_trivially_copyable_v<T>);
+          assert(std::is_trivially_copyable_v<stored_type>);
 
           // Realign and return.
-          std::aligned_storage_t<sizeof(T), alignof(T)> tmp;
+          std::aligned_storage_t<sizeof(stored_type), alignof(stored_type)> tmp;
           change_forwarder forwarder {ptr, &tmp};
-          memcpy(&tmp, ptr, sizeof(T));
+          memcpy(&tmp, ptr, sizeof(stored_type));
           (void) forwarder;
           return std::forward<Func>(callback)(std::launder(reinterpret_cast<T*>(&tmp)));
         }
@@ -282,7 +324,7 @@ namespace varvec::storage {
     for (size_t i = 0; i < count; ++i) {
       auto const type = meta[i].type;
       auto const offset = meta[i].offset;
-      get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
+      get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S const* srcptr) {
         get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
           constexpr bool types_match = std::is_same_v<S, D>;
 
@@ -545,10 +587,10 @@ namespace varvec::storage {
 
 namespace varvec {
 
-  template <template <class> class, template <std::movable...> class, std::movable...>
+  template <template <class> class, template <class...> class, std::movable...>
   class basic_variable_vector;
 
-  template <template <class> class Storage, template <std::movable...> class Variant, std::movable... Types>
+  template <template <class> class Storage, template <class...> class Variant, std::movable... Types>
   class basic_variable_iterator {
 
     public:
@@ -655,7 +697,7 @@ namespace varvec {
 
   };
 
-  template <template <class> class Storage, template <std::movable...> class Variant, std::movable... Types>
+  template <template <class> class Storage, template <class...> class Variant, std::movable... Types>
   class basic_variable_vector {
 
     public:
@@ -779,7 +821,6 @@ namespace varvec {
         return visit_at(it.idx, std::forward<Func>(callback));
       }
 
-
       void pop_back() noexcept {
         assert(size());
         auto const& meta = impl.meta[--impl.count];
@@ -796,7 +837,7 @@ namespace varvec {
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
         return storage::get_aligned_ptr_for(meta.type, curr_ptr,
-            meta::identity<logical_type> {}, [] <class T> (T* ptr) -> value_type {
+            meta::identity<logical_type> {}, [] <class T> (T const* ptr) -> value_type {
           if constexpr (std::copyable<T>) return *ptr;
           else return ptr;
         });

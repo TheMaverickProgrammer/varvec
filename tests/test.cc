@@ -160,11 +160,11 @@ TEST_CASE("move-only properties", "varvec tests") {
       REQUIRE(*it++ == val {"hello world"});
 
       std::visit(varvec::meta::overload {
-        [] (std::unique_ptr<double>* doubleptr) { REQUIRE(**doubleptr == 3.14159); },
+        [] (std::unique_ptr<double> const* doubleptr) { REQUIRE(**doubleptr == 3.14159); },
         [] (auto&&) { REQUIRE(false); }
       }, v[3]);
       std::visit(varvec::meta::overload {
-        [] (std::unique_ptr<double>* doubleptr) { REQUIRE(**doubleptr == 3.14159); },
+        [] (std::unique_ptr<double> const* doubleptr) { REQUIRE(**doubleptr == 3.14159); },
         [] (auto&&) { REQUIRE(false); }
       }, *it++);
 
