@@ -580,15 +580,16 @@ namespace varvec::storage {
 
 namespace varvec {
 
-  template <template <class> class, template <class...> class, std::movable...>
+  template <bool, template <class> class, template <class...> class, std::movable...>
   class basic_variable_vector;
 
-  template <template <class> class Storage, template <class...> class Variant, std::movable... Types>
+  template <bool throws, template <class> class Storage,
+           template <class...> class Variant, std::movable... Types>
   class basic_variable_iterator {
 
     public:
 
-      using container_type = basic_variable_vector<Storage, Variant, Types...>;
+      using container_type = basic_variable_vector<throws, Storage, Variant, Types...>;
 
       using iterator_category = std::random_access_iterator_tag;
       using value_type = typename container_type::value_type;
@@ -620,7 +621,7 @@ namespace varvec {
       value_type operator *() const
         noexcept(std::is_nothrow_copy_constructible_v<value_type>)
       {
-        assert(storage);
+        init_check();
         return (*storage)[idx];
       }
 
@@ -653,7 +654,17 @@ namespace varvec {
         storage(storage)
       {}
 
-      friend class basic_variable_vector<Storage, Variant, Types...>;
+      void init_check() const {
+        if constexpr (throws) {
+          if (!storage) {
+            throw std::runtime_error("varvec::vector::iterator was accessed uninitialized");
+          }
+        } else {
+          assert(storage);
+        }
+      }
+
+      friend class basic_variable_vector<throws, Storage, Variant, Types...>;
 
       size_type idx;
       container_type const* storage;
@@ -690,7 +701,8 @@ namespace varvec {
 
   };
 
-  template <template <class> class Storage, template <class...> class Variant, std::movable... Types>
+  template <bool throws, template <class> class Storage,
+           template <class...> class Variant, std::movable... Types>
   class basic_variable_vector {
 
     public:
@@ -698,7 +710,7 @@ namespace varvec {
       using value_type = Variant<meta::copyable_type_for_t<Types>...>;
       using size_type = size_t;
       using difference_type = std::ptrdiff_t;
-      using iterator = basic_variable_iterator<Storage, Variant, Types...>;
+      using iterator = basic_variable_iterator<throws, Storage, Variant, Types...>;
       using const_iterator = iterator;
 
       using logical_type = Variant<Types...>;
@@ -797,7 +809,10 @@ namespace varvec {
       void visit_at(size_type index, Func&& callback)
         noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
-        assert(index < size());
+        // :)
+        // Disable it if you must.
+        bounds_check(index);
+
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
         storage::get_aligned_ptr_for(meta.type, curr_ptr,
@@ -921,7 +936,10 @@ namespace varvec {
       }
 
       void pop_back() noexcept {
-        assert(size());
+        // :)
+        // Disable it if you must.
+        bounds_check(0);
+
         auto const& meta = impl.meta[--impl.count];
         auto* const curr_ptr = impl.get_data() + meta.offset;
         storage::get_aligned_ptr_for(meta.type, curr_ptr,
@@ -932,7 +950,10 @@ namespace varvec {
 
       // Subscript operator. Creates a temporary variant to return.
       value_type operator [](size_type index) const noexcept(nothrow_value_copyable) {
-        assert(index < size());
+        // :)
+        // Disable it if you must.
+        bounds_check(index);
+
         auto const& meta = impl.meta[index];
         auto* const curr_ptr = impl.get_data() + meta.offset;
         return storage::get_aligned_ptr_for(meta.type, curr_ptr,
@@ -965,12 +986,16 @@ namespace varvec {
       }
 
       value_type front() const noexcept(nothrow_value_copyable) {
-        assert(impl.count);
+        // :)
+        // Disable it if you must.
+        bounds_check(0);
         return (*this)[0];
       }
 
       value_type back() const noexcept(nothrow_value_copyable) {
-        assert(impl.count);
+        // :)
+        // Disable it if you must.
+        bounds_check(0);
         return (*this)[impl.count - 1];
       }
 
@@ -996,6 +1021,19 @@ namespace varvec {
 
     private:
 
+      void bounds_check(size_t index) const {
+        if constexpr (throws) {
+          if (index >= size()) {
+            std::string msg = "varvec::vector was indexed out of bounds. ";
+            msg += "Index was: " + std::to_string(index);
+            msg += ", Size was: " + std::to_string(size());
+            throw std::runtime_error(std::move(msg));
+          }
+        } else {
+          assert(index < size());
+        }
+      }
+
       storage_type impl;
 
       // FIXME: We can do better performance wise
@@ -1016,6 +1054,7 @@ namespace varvec {
   // A statically sized, packed, variant vector.
   template <size_t max_bytes, size_t memcount, std::movable... Types>
   using static_vector = basic_variable_vector<
+    true,
     storage::static_storage_context<max_bytes, memcount>::template static_storage,
     std::variant,
     Types...
@@ -1025,6 +1064,7 @@ namespace varvec {
   // A dynamically sized, packed, variant vector.
   template <std::movable... Types>
   using vector = basic_variable_vector<
+    true,
     storage::dynamic_storage,
     std::variant,
     Types...
