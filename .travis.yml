@@ -4,16 +4,16 @@ dist: jammy
 
 before_install:
   - sudo apt-get -qq update
-  - sudo apt-get install -y clang-14 cmake libc++-14-dev libc++abi-14-dev
+  - sudo apt-get install -y g++-10 gcc-10 cmake
   - git clone https://github.com/catchorg/Catch2.git
   - cd Catch2
-  - CC=/usr/bin/clang-14 CXX="/usr/bin/clang++-14 -stdlib=libc++" cmake -Bbuild -H. -DBUILD_TESTING=OFF
+  - cmake -Bbuild -H. -DBUILD_TESTING=OFF
   - sudo cmake --build build/ -j $(nproc) --target install
   - cd ..
 
 script:
   - mkdir build
   - cd build
-  - CC=/usr/bin/clang-14 CXX=/usr/bin/clang++-14 cmake ..
+  - CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 cmake ..
   - make
   - ctest --verbose
