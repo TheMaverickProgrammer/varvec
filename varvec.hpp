@@ -28,13 +28,6 @@ namespace varvec::meta {
     using apply_t = Func<Ts...>;
   };
 
-  template <class... Funcs>
-  struct overload : Funcs... {
-    using Funcs::operator ()...;
-  };
-  template <class... Funcs>
-  overload(Funcs...) -> overload<Funcs...>;
-
   template <class Func, std::movable... Types>
   constexpr bool nothrow_visitor_v = (std::is_nothrow_invocable_v<Func, Types> && ...);
 
@@ -1036,5 +1029,14 @@ namespace varvec {
     std::variant,
     Types...
   >;
+
+  // Feels like this should really be in varvec::meta, but it's so useful for
+  // visitation that I want it to be easier to type.
+  template <class... Funcs>
+  struct overload : Funcs... {
+    using Funcs::operator ()...;
+  };
+  template <class... Funcs>
+  overload(Funcs...) -> overload<Funcs...>;
 
 }

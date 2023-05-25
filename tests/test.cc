@@ -88,25 +88,25 @@ TEST_CASE("container properties", "[varvec tests]") {
       auto it = v.begin();
       REQUIRE(v[0] == val {true});
       REQUIRE(*it++ == val {true});
-      v.visit_at(0, varvec::meta::overload {
+      v.visit_at(0, varvec::overload {
         [] (bool& val) { REQUIRE(val == true); },
         [] (auto&) { REQUIRE(false); }
       });
       REQUIRE(v[1] == val {5});
       REQUIRE(*it++ == val {5});
-      v.visit_at(v.begin() + 1, varvec::meta::overload {
+      v.visit_at(v.begin() + 1, varvec::overload {
         [] (int& val) { REQUIRE(val == 5); },
         [] (auto&) { REQUIRE(false); }
       });
       REQUIRE(v[2] == val {(float) 3.5});
       REQUIRE(*it++ == val {(float) 3.5});
-      v.visit_at(2, varvec::meta::overload {
+      v.visit_at(2, varvec::overload {
         [] (float& val) { REQUIRE(val == 3.5); },
         [] (auto&) { REQUIRE(false); }
       });
       REQUIRE(v[3] == val {"hello world"});
       REQUIRE(*it++ == val {"hello world"});
-      v.visit_at(v.end() - 1, varvec::meta::overload {
+      v.visit_at(v.end() - 1, varvec::overload {
         [] (std::string& val) { REQUIRE(val == "hello world"); },
         [] (auto&) { REQUIRE(false); }
       });
@@ -159,16 +159,16 @@ TEST_CASE("move-only properties", "varvec tests") {
       REQUIRE(v[2] == val {"hello world"});
       REQUIRE(*it++ == val {"hello world"});
 
-      std::visit(varvec::meta::overload {
+      std::visit(varvec::overload {
         [] (std::unique_ptr<double> const* doubleptr) { REQUIRE(**doubleptr == 3.14159); },
         [] (auto&&) { REQUIRE(false); }
       }, v[3]);
-      std::visit(varvec::meta::overload {
+      std::visit(varvec::overload {
         [] (std::unique_ptr<double> const* doubleptr) { REQUIRE(**doubleptr == 3.14159); },
         [] (auto&&) { REQUIRE(false); }
       }, *it++);
 
-      v.visit_at(3, varvec::meta::overload {
+      v.visit_at(3, varvec::overload {
         [] (std::unique_ptr<double>& ptr) { REQUIRE(*ptr == 3.14159); },
         [] (auto&&) { REQUIRE(false); }
       });
@@ -198,7 +198,7 @@ TEST_CASE("mutation", "varvec tests") {
     vec.push_back((float) 3.5);
     vec.push_back("hello world");
 
-    vec.visit_at(3, varvec::meta::overload {
+    vec.visit_at(3, varvec::overload {
       [] (std::string& msg) { msg = "hello life"; },
       [] (auto&) { REQUIRE(false); }
     });
@@ -210,7 +210,7 @@ TEST_CASE("mutation", "varvec tests") {
       REQUIRE(copy.template get_at<std::string>(3) == "hello life");
     }
 
-    vec.visit_at(2, varvec::meta::overload {
+    vec.visit_at(2, varvec::overload {
       [] (float& msg) { msg = 42.0; },
       [] (auto&) { REQUIRE(false); }
     });
@@ -222,14 +222,14 @@ TEST_CASE("mutation", "varvec tests") {
       REQUIRE(copy.template get_at<float>(2) == 42.0);
     }
 
-    vec.visit_at(1, varvec::meta::overload {
+    vec.visit_at(1, varvec::overload {
       [] (int& msg) { msg = 1337; },
       [] (auto&) { REQUIRE(false); }
     });
     REQUIRE(std::get<int>(vec[1]) == 1337);
     REQUIRE(vec.template get_at<int>(1) == 1337);
 
-    vec.visit_at(0, varvec::meta::overload {
+    vec.visit_at(0, varvec::overload {
       [] (bool& msg) { msg = false; },
       [] (auto&) { REQUIRE(false); }
     });
