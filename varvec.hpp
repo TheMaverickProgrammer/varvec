@@ -420,7 +420,7 @@ namespace varvec::storage {
     }
 
     bool has_space(size_t more) const noexcept {
-      if (count < memcount) return offset + more < bytes;
+      if (count < memcount) return offset + more <= bytes;
       else return false;
     }
 
