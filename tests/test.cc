@@ -1,9 +1,26 @@
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/catch_session.hpp>
+#include <catch2/benchmark/catch_benchmark_all.hpp>
 
 #include "../varvec.hpp"
 
+template <size_t max_bytes, size_t memcount, std::movable... Types>
+using unsafe_static_vector = varvec::basic_variable_vector<
+  false,
+  varvec::storage::static_storage_context<max_bytes, memcount>::template static_storage,
+  std::variant,
+  Types...
+>;
+
+template <std::movable... Types>
+using unsafe_dynamic_vector = varvec::basic_variable_vector<
+  false,
+  varvec::storage::dynamic_storage,
+  std::variant,
+  Types...
+>;
+
 using trivial_vector = varvec::static_vector<32, 8, bool, int, float>;
+using unsafe_trivial_vector = unsafe_static_vector<32, 8, bool, int, float>;
 
 static_assert(
   sizeof(trivial_vector) == 32 + (8 * 2) + 4
@@ -14,6 +31,7 @@ static_assert(
 );
 
 using copyable_vector = varvec::static_vector<128, 4, bool, int, float, std::string>;
+using unsafe_copyable_vector = unsafe_static_vector<128, 4, bool, int, float, std::string>;
 
 static_assert(
   !std::is_trivially_destructible_v<copyable_vector>
@@ -24,6 +42,7 @@ static_assert(
 );
 
 using movable_vector = varvec::static_vector<128, 4, bool, int, float, std::string, std::unique_ptr<double>>;
+using unsafe_movable_vector = unsafe_static_vector<128, 4, bool, int, float, std::string, std::unique_ptr<double>>;
 
 static_assert(
   !std::is_trivially_destructible_v<movable_vector>
@@ -33,17 +52,19 @@ static_assert(
   std::movable<movable_vector>
 );
 
-using dynamic_vector = varvec::vector<bool, int, float, std::string>;
+using dynamic_copyable_vector = varvec::vector<bool, int, float, std::string>;
+using unsafe_dynamic_copyable_vector = unsafe_dynamic_vector<bool, int, float, std::string>;
 
 static_assert(
-  !std::is_trivially_destructible_v<dynamic_vector>
+  !std::is_trivially_destructible_v<dynamic_copyable_vector>
   &&
-  std::copyable<dynamic_vector>
+  std::copyable<dynamic_copyable_vector>
   &&
-  std::movable<dynamic_vector>
+  std::movable<dynamic_copyable_vector>
 );
 
 using dynamic_movable_vector = varvec::vector<bool, int, float, std::string, std::unique_ptr<double>>;
+using unsafe_dynamic_movable_vector = unsafe_dynamic_vector<bool, int, float, std::string, std::unique_ptr<double>>;
 
 static_assert(
   !std::is_trivially_destructible_v<dynamic_movable_vector>
@@ -81,7 +102,7 @@ TEST_CASE("construction properties", "[varvec tests]") {
   asserts(varvec::meta::identity<trivial_vector> {});
   asserts(varvec::meta::identity<copyable_vector> {});
   asserts(varvec::meta::identity<movable_vector> {});
-  asserts(varvec::meta::identity<dynamic_vector> {});
+  asserts(varvec::meta::identity<dynamic_copyable_vector> {});
   asserts(varvec::meta::identity<dynamic_movable_vector> {});
 }
 
@@ -146,7 +167,7 @@ TEST_CASE("container properties", "[varvec tests]") {
   };
   asserts(varvec::meta::identity<copyable_vector> {});
   asserts(varvec::meta::identity<movable_vector> {});
-  asserts(varvec::meta::identity<dynamic_vector> {});
+  asserts(varvec::meta::identity<dynamic_copyable_vector> {});
   asserts(varvec::meta::identity<dynamic_movable_vector> {});
 }
 
@@ -251,6 +272,75 @@ TEST_CASE("mutation", "varvec tests") {
   };
   asserts(varvec::meta::identity<copyable_vector> {});
   asserts(varvec::meta::identity<movable_vector> {});
-  asserts(varvec::meta::identity<dynamic_vector> {});
+  asserts(varvec::meta::identity<dynamic_copyable_vector> {});
   asserts(varvec::meta::identity<dynamic_movable_vector> {});
 }
+
+#ifdef VARVEC_BENCHMARK
+TEST_CASE("performance", "varvec benchmarks") {
+  unsafe_copyable_vector vec;
+  std::vector<std::variant<bool, int, float, std::string>> stdvec;
+
+  vec.push_back(bool(rand() % 2));
+  vec.push_back(rand());
+  vec.push_back(0.5f + rand());
+  vec.push_back("hello world" + std::to_string(rand()));
+
+  stdvec.push_back(bool(rand() % 2));
+  stdvec.push_back(rand());
+  stdvec.push_back(0.5f + rand());
+  stdvec.push_back("hello world" + std::to_string(rand()));
+
+  BENCHMARK("static vector bool subscript operator") {
+    return vec[0];
+  };
+  BENCHMARK("static vector int subscript operator") {
+    return vec[1];
+  };
+  BENCHMARK("static vector float subscript operator") {
+    return vec[2];
+  };
+  BENCHMARK("static vector std::string subscript operator") {
+    return vec[3];
+  };
+
+  BENCHMARK("std::vector<std::variant> bool subscript operator") {
+    return stdvec[0];
+  };
+  BENCHMARK("std::vector<std::variant> int subscript operator") {
+    return stdvec[1];
+  };
+  BENCHMARK("std::vector<std::variant> float subscript operator") {
+    return stdvec[2];
+  };
+  BENCHMARK("std::vector<std::variant> std::string subscript operator") {
+    return stdvec[3];
+  };
+
+  BENCHMARK("static vector bool get_at") {
+    return vec.get_at<bool>(0);
+  };
+  BENCHMARK("static vector int get_at") {
+    return vec.get_at<int>(1);
+  };
+  BENCHMARK("static vector float get_at") {
+    return vec.get_at<float>(2);
+  };
+  BENCHMARK("static vector std::string get_at") {
+    return vec.get_at<std::string>(3);
+  };
+
+  BENCHMARK("std::vector<std::variant> bool std::get") {
+    return std::get<bool>(vec[0]);
+  };
+  BENCHMARK("std::vector<std::variant> int std::get") {
+    return std::get<int>(vec[1]);
+  };
+  BENCHMARK("std::vector<std::variant> float std::get") {
+    return std::get<float>(vec[2]);
+  };
+  BENCHMARK("std::vector<std::variant> std::string std::get") {
+    return std::get<std::string>(vec[3]);
+  };
+}
+#endif
