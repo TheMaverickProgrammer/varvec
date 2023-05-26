@@ -1,4 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_session.hpp>
+
 #include "../varvec.hpp"
 
 using trivial_vector = varvec::static_vector<32, 8, bool, int, float>;
@@ -54,18 +56,26 @@ static_assert(
 TEST_CASE("construction properties", "[varvec tests]") {
   auto asserts = [] <class V> (varvec::meta::identity<V>) {
     V vec;
+    typename V::iterator vecit = vec.begin();
     REQUIRE(vec.size() == 0);
     REQUIRE(vec.empty());
     REQUIRE(vec.used_bytes() > 0);
     REQUIRE(vec.begin() == vec.end());
 
+    REQUIRE_THROWS_AS(vec[0], std::out_of_range);
+    REQUIRE_THROWS_AS(*vecit, std::out_of_range);
+
     if constexpr (std::copyable<V>) {
       auto copy = vec;
+      vecit = copy.begin();
       REQUIRE(copy.size() == 0);
       REQUIRE(copy.empty());
       REQUIRE(copy.used_bytes() > 0);
       REQUIRE(copy.begin() == copy.end());
       REQUIRE(copy == vec);
+
+      REQUIRE_THROWS_AS(copy[0], std::out_of_range);
+      REQUIRE_THROWS_AS(*vecit, std::out_of_range);
     }
   };
   asserts(varvec::meta::identity<trivial_vector> {});

@@ -619,7 +619,7 @@ namespace varvec {
       }
 
       value_type operator *() const
-        noexcept(std::is_nothrow_copy_constructible_v<value_type>)
+        noexcept(!throws && std::is_nothrow_copy_constructible_v<value_type>)
       {
         init_check();
         return (*storage)[idx];
@@ -807,7 +807,7 @@ namespace varvec {
       template <class Func>
       requires (std::is_invocable_v<Func, Types&> && ...)
       void visit_at(size_type index, Func&& callback)
-        noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
+        noexcept(!throws && (std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
         // :)
         // Disable it if you must.
@@ -935,7 +935,7 @@ namespace varvec {
         return get_at<T>(it);
       }
 
-      void pop_back() noexcept {
+      void pop_back() noexcept(!throws) {
         // :)
         // Disable it if you must.
         bounds_check(0);
@@ -949,7 +949,7 @@ namespace varvec {
       }
 
       // Subscript operator. Creates a temporary variant to return.
-      value_type operator [](size_type index) const noexcept(nothrow_value_copyable) {
+      value_type operator [](size_type index) const noexcept(!throws && nothrow_value_copyable) {
         // :)
         // Disable it if you must.
         bounds_check(index);
@@ -985,14 +985,14 @@ namespace varvec {
         return *this;
       }
 
-      value_type front() const noexcept(nothrow_value_copyable) {
+      value_type front() const noexcept(!throws && nothrow_value_copyable) {
         // :)
         // Disable it if you must.
         bounds_check(0);
         return (*this)[0];
       }
 
-      value_type back() const noexcept(nothrow_value_copyable) {
+      value_type back() const noexcept(!throws && nothrow_value_copyable) {
         // :)
         // Disable it if you must.
         bounds_check(0);
@@ -1026,8 +1026,8 @@ namespace varvec {
           if (index >= size()) {
             std::string msg = "varvec::vector was indexed out of bounds. ";
             msg += "Index was: " + std::to_string(index);
-            msg += ", Size was: " + std::to_string(size());
-            throw std::runtime_error(std::move(msg));
+            msg += ", size was: " + std::to_string(size());
+            throw std::out_of_range(msg);
           }
         } else {
           assert(index < size());
