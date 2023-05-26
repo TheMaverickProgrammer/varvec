@@ -809,8 +809,7 @@ namespace varvec {
       void visit_at(size_type index, Func&& callback)
         noexcept(!throws && (std::is_nothrow_invocable_v<Func, Types&> && ...))
       {
-        // :)
-        // Disable it if you must.
+        // Disable it if you must :)
         bounds_check(index);
 
         auto const& meta = impl.meta[index];
@@ -845,13 +844,16 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T& get_at(size_type index) & {
+      T& get_at(size_type index) & noexcept(!throws) {
         T* ptr = nullptr;
         visit_at(index, [&] <class U> (U& val) {
           if constexpr (std::is_same_v<U, T>) {
             ptr = &val;
-          } else {
+          } else if constexpr (throws) {
+            // FIXME: Is this the right move? Should I create an internal type?
             throw std::bad_cast();
+          } else {
+            assert("You called varvec::vector::get_at with the wrong type" && false);
           }
         });
         return *ptr;
@@ -863,7 +865,7 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T& get_at(iterator it) & {
+      T& get_at(iterator it) & noexcept(!throws) {
         return get_at<T>(it);
       }
 
@@ -873,7 +875,7 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T const& get_at(size_type index) const& {
+      T const& get_at(size_type index) const& noexcept(!throws) {
         return const_cast<basic_variable_vector*>(this)->get_at<T>(index);
       }
 
@@ -883,7 +885,7 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T const& get_at(iterator it) const& {
+      T const& get_at(iterator it) const& noexcept(!throws) {
         return get_at<T>(it.idx);
       }
 
@@ -893,7 +895,7 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T&& get_at(size_type index) && {
+      T&& get_at(size_type index) && noexcept(!throws) {
         return get_at<T>();
       }
 
@@ -903,7 +905,7 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T&& get_at(iterator it) && {
+      T&& get_at(iterator it) && noexcept(!throws) {
         return std::move(*this).template get_at<T>(it.idx);
       }
 
@@ -913,13 +915,16 @@ namespace varvec {
         &&
         (std::is_same_v<T, Types> || ...)
       )
-      T get_at(size_type index) const {
+      T get_at(size_type index) const noexcept(!throws) {
         T retval;
         visit_at(index, [&] <class U> (U const& val) {
           if constexpr (std::is_same_v<U, T>) {
             retval = val;
-          } else {
+          } else if constexpr (throws) {
+            // FIXME: Is this the right move? Should I create an internal type?
             throw std::bad_cast();
+          } else {
+            assert("You called varvec::vector::get_at with the wrong type" && false);
           }
         });
         return retval;
@@ -936,8 +941,7 @@ namespace varvec {
       }
 
       void pop_back() noexcept(!throws) {
-        // :)
-        // Disable it if you must.
+        // Disable it if you must :)
         bounds_check(0);
 
         auto const& meta = impl.meta[--impl.count];
@@ -950,8 +954,7 @@ namespace varvec {
 
       // Subscript operator. Creates a temporary variant to return.
       value_type operator [](size_type index) const noexcept(!throws && nothrow_value_copyable) {
-        // :)
-        // Disable it if you must.
+        // Disable it if you must :)
         bounds_check(index);
 
         auto const& meta = impl.meta[index];
@@ -986,15 +989,13 @@ namespace varvec {
       }
 
       value_type front() const noexcept(!throws && nothrow_value_copyable) {
-        // :)
-        // Disable it if you must.
+        // Disable it if you must :)
         bounds_check(0);
         return (*this)[0];
       }
 
       value_type back() const noexcept(!throws && nothrow_value_copyable) {
-        // :)
-        // Disable it if you must.
+        // Disable it if you must :)
         bounds_check(0);
         return (*this)[impl.count - 1];
       }
