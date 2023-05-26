@@ -716,6 +716,12 @@ namespace varvec {
     static constexpr bool nontrivial_get_reqs_v =
         contained_type_v<T> && !std::is_trivially_constructible_v<T>;
 
+    template <class Func>
+    static constexpr bool exhaustive_visitor_v = (std::is_invocable_v<Func, Types&> && ...);
+
+    template <class Func>
+    static constexpr bool nothrow_exhaustive_visitor_v = (std::is_nothrow_invocable_v<Func, Types&> && ...);
+
     public:
 
       using value_type = Variant<meta::copyable_type_for_t<Types>...>;
@@ -816,9 +822,9 @@ namespace varvec {
       // Function allows std::visit style visitation syntax at a given index.
       // Useful because it's the only call that allows universal mutation.
       template <class Func>
-      requires (std::is_invocable_v<Func, Types&> && ...)
+      requires exhaustive_visitor_v<Func>
       void visit_at(size_type index, Func&& callback)
-        noexcept(!throws && (std::is_nothrow_invocable_v<Func, Types&> && ...))
+        noexcept(!throws && nothrow_exhaustive_visitor_v<Func>)
       {
         // Disable it if you must :)
         bounds_check(index);
@@ -832,9 +838,9 @@ namespace varvec {
       }
 
       template <class Func>
-      requires (std::is_invocable_v<Func, Types&> && ...)
+      requires exhaustive_visitor_v<Func>
       void visit_at(size_type index, Func&& callback) const
-        noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
+        noexcept(!throws && nothrow_exhaustive_visitor_v<Func>)
       {
         const_cast<basic_variable_vector*>(this)->visit_at(index, [&] <class T> (T& val) {
           std::forward<Func>(callback)(const_cast<T const&>(val));
@@ -842,19 +848,15 @@ namespace varvec {
       }
 
       template <class Func>
-      requires (std::is_invocable_v<Func, Types&> && ...)
+      requires exhaustive_visitor_v<Func>
       void visit_at(iterator it, Func&& callback)
-        noexcept((std::is_nothrow_invocable_v<Func, Types&> && ...))
+        noexcept(!throws && nothrow_exhaustive_visitor_v<Func>)
       {
         visit_at(it.idx, std::forward<Func>(callback));
       }
 
       template <class T>
-      requires (
-        !std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires nontrivial_get_reqs_v<T>
       T& get_at(size_type index) & noexcept(!throws) {
         T* ptr = nullptr;
         visit_at(index, [&] <class U> (U& val) {
@@ -918,11 +920,7 @@ namespace varvec {
       }
 
       template <class T>
-      requires (
-        std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires trivial_get_reqs_v<T>
       T get_at(iterator it) const {
         return get_at<T>(it);
       }
