@@ -27,7 +27,7 @@ A motivating example akin to `std::vector<std::variant<...>>`:
 int main() {
     // A complex vector type.
     using mixed_vector = varvec::static_vector<
-        32,   // Total space to use
+        32,   // Total space to use for member storage
         5,    // Max members
         bool, // Types...
         int,
