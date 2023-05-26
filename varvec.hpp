@@ -411,8 +411,12 @@ namespace varvec::storage {
       throw std::bad_alloc();
     }
 
-    size_t size() const noexcept {
+    size_t buffer_size() const noexcept {
       return bytes;
+    }
+
+    size_t size() const noexcept {
+      return bytes + sizeof(meta);
     }
 
     bool has_space(size_t more) const noexcept {
@@ -451,16 +455,18 @@ namespace varvec::storage {
   };
 
   // Base class for dynamically sized buffer storage.
-  template <class Variant>
+  template <class SizeType, class Variant>
   struct dynamic_storage {
 
+    using size_type = SizeType;
     using variant_type = Variant;
 
+    static constexpr auto start_members = 8;
+    static constexpr auto start_size = start_members * meta::max_size_of(meta::identity<variant_type> {});
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
-    static constexpr auto start_size = 8 * meta::max_size_of(meta::identity<variant_type> {});
 
     dynamic_storage() :
-      meta(std::ceil(start_size / (double) meta::min_size_of(meta::identity<Variant> {}))),
+      meta(start_members),
       data(new (std::align_val_t(max_alignment)) uint8_t[start_size], aligned_delete)
     {}
 
@@ -524,10 +530,9 @@ namespace varvec::storage {
       operator delete[] (ptr, std::align_val_t(max_alignment));
     }
 
-    uint8_t* resize(size_t newsize) {
-      assert(newsize >= bytes);
-
+    uint8_t* resize(size_t scale) {
       // Align some storage
+      size_t const newsize = bytes * scale;
       std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> newdata {
         new (std::align_val_t(max_alignment)) uint8_t[newsize], aligned_delete
       };
@@ -544,25 +549,33 @@ namespace varvec::storage {
       // Update
       data = std::move(newdata);
       bytes = newsize;
-      meta.resize(std::ceil(bytes / (double) meta::min_size_of(meta::identity<Variant> {})));
+      meta.resize(meta.size() * scale);
       return get_data() + offset;
     }
 
-    size_t size() const noexcept {
+    size_t buffer_size() const noexcept {
       return bytes;
+    }
+
+    size_t size() const noexcept {
+      return buffer_size() + (sizeof(storage_metadata<size_type>) * meta.size());
     }
 
     bool has_space(size_t more) const noexcept {
       return offset + more < bytes;
     }
 
-    size_t bytes {start_size};
-    size_t count {0};
-    size_t offset {0};
-    std::vector<storage_metadata<size_t>> meta;
+    size_type bytes {start_size};
+    size_type count {0};
+    size_type offset {0};
+    std::vector<storage_metadata<size_type>> meta;
     std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> data;
 
   };
+
+  // uint32_t is a compromise
+  template <class Variant>
+  using default_dynamic_storage = dynamic_storage<uint32_t, Variant>;
 
   // Surrounding "context" type is necessary to adapt the template signature
   // of the static storage types to get a consistent arity.
@@ -802,7 +815,7 @@ namespace varvec {
         while (!impl.has_space(required_bytes + alignment_bytes)) {
           // FIXME: Rethink grow strategy
           // Will throw for static vector
-          data_ptr = impl.resize(impl.size() * 2);
+          data_ptr = impl.resize(2);
         }
 
         impl.incr_offset(alignment_bytes);
@@ -1051,7 +1064,7 @@ namespace varvec {
   template <std::movable... Types>
   using vector = basic_variable_vector<
     true,
-    storage::dynamic_storage,
+    storage::default_dynamic_storage,
     std::variant,
     Types...
   >;

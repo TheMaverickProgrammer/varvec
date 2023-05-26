@@ -14,7 +14,7 @@ using unsafe_static_vector = varvec::basic_variable_vector<
 template <std::movable... Types>
 using unsafe_dynamic_vector = varvec::basic_variable_vector<
   false,
-  varvec::storage::dynamic_storage,
+  varvec::storage::default_dynamic_storage,
   std::variant,
   Types...
 >;
@@ -289,12 +289,18 @@ TEST_CASE("mutation", "varvec tests") {
 #ifdef VARVEC_BENCHMARK
 TEST_CASE("performance", "varvec benchmarks") {
   unsafe_copyable_vector vec;
+  unsafe_dynamic_copyable_vector dvec;
   std::vector<std::variant<bool, int, float, std::string>> stdvec;
 
   vec.push_back(bool(rand() % 2));
   vec.push_back(rand());
   vec.push_back(0.5f + rand());
   vec.push_back("hello world" + std::to_string(rand()));
+
+  dvec.push_back(bool(rand() % 2));
+  dvec.push_back(rand());
+  dvec.push_back(0.5f + rand());
+  dvec.push_back("hello world" + std::to_string(rand()));
 
   stdvec.push_back(bool(rand() % 2));
   stdvec.push_back(rand());
@@ -312,6 +318,19 @@ TEST_CASE("performance", "varvec benchmarks") {
   };
   BENCHMARK("static vector std::string subscript operator") {
     return vec[3];
+  };
+
+  BENCHMARK("dynamic vector bool subscript operator") {
+    return dvec[0];
+  };
+  BENCHMARK("dynamic vector int subscript operator") {
+    return dvec[1];
+  };
+  BENCHMARK("dynamic vector float subscript operator") {
+    return dvec[2];
+  };
+  BENCHMARK("dynamic vector std::string subscript operator") {
+    return dvec[3];
   };
 
   BENCHMARK("std::vector<std::variant> bool subscript operator") {
@@ -338,6 +357,19 @@ TEST_CASE("performance", "varvec benchmarks") {
   };
   BENCHMARK("static vector std::string get_at") {
     return vec.get_at<std::string>(3);
+  };
+
+  BENCHMARK("dynamic vector bool get_at") {
+    return dvec.get_at<bool>(0);
+  };
+  BENCHMARK("dynamic vector int get_at") {
+    return dvec.get_at<int>(1);
+  };
+  BENCHMARK("dynamic vector float get_at") {
+    return dvec.get_at<float>(2);
+  };
+  BENCHMARK("dynamic vector std::string get_at") {
+    return dvec.get_at<std::string>(3);
   };
 
   BENCHMARK("std::vector<std::variant> bool std::get") {
