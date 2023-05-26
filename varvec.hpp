@@ -705,6 +705,17 @@ namespace varvec {
            template <class...> class Variant, std::movable... Types>
   class basic_variable_vector {
 
+    template <class T>
+    static constexpr bool contained_type_v = (std::is_same_v<T, Types> || ...);
+
+    template <class T>
+    static constexpr bool trivial_get_reqs_v =
+        contained_type_v<T> && std::is_trivially_constructible_v<T>;
+
+    template <class T>
+    static constexpr bool nontrivial_get_reqs_v =
+        contained_type_v<T> && !std::is_trivially_constructible_v<T>;
+
     public:
 
       using value_type = Variant<meta::copyable_type_for_t<Types>...>;
@@ -860,61 +871,37 @@ namespace varvec {
       }
 
       template <class T>
-      requires (
-        !std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires nontrivial_get_reqs_v<T>
       T& get_at(iterator it) & noexcept(!throws) {
         return get_at<T>(it);
       }
 
       template <class T>
-      requires (
-        !std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires nontrivial_get_reqs_v<T>
       T const& get_at(size_type index) const& noexcept(!throws) {
         return const_cast<basic_variable_vector*>(this)->get_at<T>(index);
       }
 
       template <class T>
-      requires (
-        !std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires nontrivial_get_reqs_v<T>
       T const& get_at(iterator it) const& noexcept(!throws) {
         return get_at<T>(it.idx);
       }
 
       template <class T>
-      requires (
-        !std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires nontrivial_get_reqs_v<T>
       T&& get_at(size_type index) && noexcept(!throws) {
         return get_at<T>();
       }
 
       template <class T>
-      requires (
-        !std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires nontrivial_get_reqs_v<T>
       T&& get_at(iterator it) && noexcept(!throws) {
         return std::move(*this).template get_at<T>(it.idx);
       }
 
       template <class T>
-      requires (
-        std::is_trivially_constructible_v<T>
-        &&
-        (std::is_same_v<T, Types> || ...)
-      )
+      requires trivial_get_reqs_v<T>
       T get_at(size_type index) const noexcept(!throws) {
         T retval;
         visit_at(index, [&] <class U> (U const& val) {

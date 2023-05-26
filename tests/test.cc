@@ -27,6 +27,16 @@ static_assert(
 );
 
 static_assert(
+  noexcept(std::declval<unsafe_trivial_vector>()[0])
+);
+static_assert(
+  noexcept(std::declval<unsafe_trivial_vector>().get_at<bool>(0))
+);
+static_assert(
+  noexcept(std::declval<unsafe_trivial_vector>().visit_at(0, [] (auto&) noexcept {}))
+);
+
+static_assert(
   std::is_trivially_destructible_v<trivial_vector>
 );
 
