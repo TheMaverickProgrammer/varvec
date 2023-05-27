@@ -69,7 +69,7 @@ int main() {
     }
 
     // Outputs:
-    // 42
+    // 39
     // std::vector<variant<...>> would require ~80 bytes.
     std::cout << vals.used_bytes() << std::endl;
 }

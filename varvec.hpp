@@ -4,6 +4,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <climits>
 #include <cstring>
 #include <cassert>
 #include <variant>
@@ -32,22 +33,27 @@ namespace varvec::meta {
   constexpr bool nothrow_visitor_v = (std::is_nothrow_invocable_v<Func, Types> && ...);
 
   template <template <class...> class Container, class... Ts>
-  constexpr auto max_alignment_of(identity<Container<Ts...>>) {
+  constexpr auto max_alignment_of(identity<Container<Ts...>>) noexcept {
     return std::max({alignof(Ts)...});
   }
 
   template <template <class...> class Container, class... Ts>
-  constexpr auto max_size_of(identity<Container<Ts...>>) {
+  constexpr auto max_size_of(identity<Container<Ts...>>) noexcept {
     return std::max({sizeof(Ts)...});
   }
 
   template <template <class...> class Container, class... Ts>
-  constexpr auto min_size_of(identity<Container<Ts...>>) {
+  constexpr auto min_size_of(identity<Container<Ts...>>) noexcept {
     return std::min({sizeof(Ts)...});
   }
 
+  template <template <class...> class Container, class... Ts>
+  constexpr auto num_types_in(identity<Container<Ts...>>) noexcept {
+    return sizeof...(Ts);
+  }
+
   template <size_t num>
-  constexpr auto smallest_type_for() {
+  constexpr auto smallest_type_for() noexcept {
     if constexpr (num <= std::numeric_limits<uint8_t>::max()) {
       return meta::identity<uint8_t> {};
     } else if constexpr (num <= std::numeric_limits<uint16_t>::max()) {
@@ -58,6 +64,42 @@ namespace varvec::meta {
       static_assert(num <= std::numeric_limits<uint64_t>::max());
       return meta::identity<uint64_t> {};
     }
+  }
+
+  template <auto num>
+  constexpr auto necessary_bits_for() noexcept {
+    if (num == 0) return decltype(num) {1U};
+    auto curr = num;
+    decltype(num) bits = 0;
+    while (curr > 0) {
+      ++bits;
+      curr >>= 1;
+    }
+    return bits;
+  }
+
+  template <auto num>
+  constexpr size_t rounded_bits_for() noexcept {
+    auto necessary = necessary_bits_for<num>();
+    --necessary;
+    necessary |= necessary >> 1;
+    necessary |= necessary >> 2;
+    necessary |= necessary >> 4;
+    if constexpr (sizeof(necessary) >= 2) {
+      necessary |= necessary >> 8;
+    }
+    if constexpr (sizeof(necessary) >= 4) {
+      necessary |= necessary >> 16;
+    }
+    if constexpr (sizeof(necessary) >= 8) {
+      necessary |= necessary >> 32;
+    }
+    return ++necessary;
+  }
+
+  constexpr int64_t int_ceil(double val) {
+    int64_t casted = static_cast<int64_t>(val);
+    return val > casted ? casted + 1 : val;
   }
 
   template <size_t num>
@@ -172,11 +214,63 @@ namespace varvec::meta {
 
 namespace varvec::storage {
 
-  template <class Variant, size_t bytes>
-  using storage_type = std::aligned_storage_t<
-    bytes,
-    meta::max_alignment_of(meta::identity<Variant> {})
-  >;
+  template <size_t bits_per_entry, size_t memcount>
+  struct packed_bitvec {
+
+    // XXX: Kind of kludgey, but it means the rest of the code doesn't have to think
+    // about this.
+    struct byte_proxy {
+      byte_proxy& operator =(uint8_t newval) {
+        val = newval;
+        container->set_bit(index, val);
+        return *this;
+      }
+
+      operator uint8_t() const noexcept {
+        return val;
+      }
+
+      uint8_t val;
+      size_t index;
+      packed_bitvec* container;
+    };
+
+    static_assert(meta::necessary_bits_for<bits_per_entry>() <= 8,
+        "packed_bitvec can only encode representations of up to 1 byte");
+
+    static constexpr size_t total_bytes = meta::int_ceil((bits_per_entry * memcount) / CHAR_BIT);
+
+    packed_bitvec() noexcept : storage({0}) {}
+
+    byte_proxy operator [](size_t index) noexcept {
+      auto masked = (const_cast<packed_bitvec const&>(*this))[index];
+      return byte_proxy {masked, index, this};
+    }
+
+    uint8_t operator [](size_t index) const noexcept {
+      auto [byte, bit] = calculate_location(index);
+      auto data = storage[byte];
+      return (data >> bit) & ~(~0U << bits_per_entry);
+    }
+
+    void set_bit(size_t index, uint8_t val) noexcept {
+      assert(val < (1 << bits_per_entry));
+      auto [byte, bit] = calculate_location(index);
+      auto data = storage[byte];
+
+      // FIXME: I feel like this shouldn't require so many complements...
+      storage[byte] = (data & ~(~(~0U << bits_per_entry) << bit)) | (val << bit);
+    }
+
+    std::tuple<size_t, size_t> calculate_location(size_t index) const noexcept {
+      // FIXME: Any other options? Division is slow
+      auto bit_idx = index * bits_per_entry;
+      return {bit_idx / CHAR_BIT, bit_idx % CHAR_BIT};
+    }
+
+    std::array<uint8_t, total_bytes> storage;
+
+  };
 
   template <class T>
   constexpr bool aligned_for_type(void const* ptr) noexcept {
@@ -284,14 +378,14 @@ namespace varvec::storage {
   }
 
   // Takes care of element-wise move operations for a packed buffer.
-  template <class Variant, class Storage, class Metadata>
+  template <class Variant, class Storage, class Types, class Offsets>
   constexpr auto move_storage(size_t count,
-      Metadata const& meta, Storage* dest, Storage* src)
+      Types const& types, Offsets const& offsets, Storage* dest, Storage* src)
     noexcept(std::is_nothrow_move_constructible_v<Variant>)
   {
     for (size_t i = 0; i < count; ++i) {
-      auto const type = meta[i].type;
-      auto const offset = meta[i].offset;
+      uint8_t const type = types[i];
+      auto const offset = offsets[i];
       get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S* srcptr) {
         get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
           constexpr bool types_match = std::is_same_v<S, D>;
@@ -309,14 +403,14 @@ namespace varvec::storage {
   }
 
   // Takes care of element-wise copy operations for a packed buffer.
-  template <class Variant, class Storage, class Metadata>
+  template <class Variant, class Storage, class Types, class Offsets>
   constexpr auto copy_storage(size_t count,
-      Metadata const& meta, Storage* dest, Storage const* src)
+      Types const& types, Offsets const& offsets, Storage* dest, Storage const* src)
     noexcept(std::is_nothrow_copy_constructible_v<Variant>)
   {
     for (size_t i = 0; i < count; ++i) {
-      auto const type = meta[i].type;
-      auto const offset = meta[i].offset;
+      uint8_t const type = types[i];
+      auto const offset = offsets[i];
       get_typed_ptr_for(type, src + offset, meta::identity<Variant> {}, [&] <class S> (S const* srcptr) {
         get_typed_ptr_for(type, dest + offset, meta::identity<Variant> {}, [&] <class D> (D* destptr) {
           constexpr bool types_match = std::is_same_v<S, D>;
@@ -333,24 +427,36 @@ namespace varvec::storage {
     }
   }
 
-  // Holds buffer metadata for an individual vector element
-  template <class OffsetType>
-  struct storage_metadata {
-    uint8_t type;
-    OffsetType offset;
-  };
-
   // Base class for statically sized buffer storage.
   template <class Variant, size_t bytes, size_t memcount>
   struct static_storage_base {
 
     using variant_type = Variant;
-    using packed_size_type = meta::smallest_type_for_t<std::max({bytes, memcount})>;
 
+    static constexpr auto num_types = meta::num_types_in(meta::identity<Variant> {});
+    static constexpr auto type_bits = meta::rounded_bits_for<num_types - 1>();
     static constexpr auto start_size = memcount;
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
 
-    static_storage_base() noexcept : count(0), offset(0), meta({0}), data({0}) {}
+    using packed_size_type = meta::smallest_type_for_t<std::max({bytes, memcount})>;
+
+    using unpacked_type_storage = std::array<
+      meta::smallest_type_for_t<std::max({num_types})>(),
+      memcount
+    >;
+
+    using type_storage = std::conditional_t<
+      type_bits <= 8,
+      packed_bitvec<type_bits, memcount>,
+      unpacked_type_storage
+    >;
+
+    using storage_type = std::aligned_storage_t<
+      bytes,
+      meta::max_alignment_of(meta::identity<Variant> {})
+    >;
+
+    static_storage_base() noexcept : count(0), offset(0), types(), offsets({0}), data({0}) {}
 
     explicit static_storage_base(size_t start_bytes) {
       if (start_bytes > bytes) {
@@ -364,12 +470,13 @@ namespace varvec::storage {
     :
       count(other.count),
       offset(other.offset),
-      meta(other.meta)
+      types(other.types),
+      offsets(other.offsets)
     {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         data = other.data;
       } else {
-        copy_storage<Variant>(count, meta, get_data(), other.get_data());
+        copy_storage<Variant>(count, types, offsets, get_data(), other.get_data());
       }
     }
 
@@ -378,12 +485,13 @@ namespace varvec::storage {
     :
       count(other.count),
       offset(other.offset),
-      meta(other.meta)
+      types(other.types),
+      offsets(other.offsets)
     {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         data = other.data;
       } else {
-        move_storage<Variant>(count, meta, get_data(), other.get_data());
+        move_storage<Variant>(count, types, offsets, get_data(), other.get_data());
       }
       other.count = 0;
       other.offset = 0;
@@ -416,7 +524,7 @@ namespace varvec::storage {
     }
 
     size_t size() const noexcept {
-      return bytes + sizeof(meta);
+      return sizeof(types) + sizeof(offsets) + sizeof(data);
     }
 
     bool has_space(size_t more) const noexcept {
@@ -426,8 +534,10 @@ namespace varvec::storage {
 
     packed_size_type count;
     packed_size_type offset;
-    std::array<storage_metadata<packed_size_type>, memcount> meta;
-    storage_type<Variant, bytes> data;
+
+    type_storage types;
+    std::array<packed_size_type, memcount> offsets;
+    storage_type data;
 
   };
 
@@ -442,8 +552,8 @@ namespace varvec::storage {
     ~destructible_static_storage_base() noexcept {
       while (this->count) {
         auto const curr_count = --this->count;
-        auto const curr_type = this->meta[curr_count].type;
-        auto const curr_offset = this->meta[curr_count].offset;
+        uint8_t const curr_type = this->types[curr_count];
+        auto const curr_offset = this->offsets[curr_count];
         auto* const curr_ptr = this->get_data() + curr_offset;
         get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
           value->~T();
@@ -466,7 +576,8 @@ namespace varvec::storage {
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
 
     dynamic_storage() :
-      meta(start_members),
+      types(start_members),
+      offsets(start_members),
       data(new (std::align_val_t(max_alignment)) uint8_t[start_size], aligned_delete)
     {}
 
@@ -476,13 +587,14 @@ namespace varvec::storage {
       bytes(other.bytes),
       count(other.count),
       offset(other.offset),
-      meta(other.meta),
+      types(other.types),
+      offsets(other.offsets),
       data(new (std::align_val_t(max_alignment)) uint8_t[bytes], aligned_delete)
     {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         memcpy(get_data(), other.get_data(), bytes);
       } else {
-        copy_storage<Variant>(count, meta, get_data(), other.get_data());
+        copy_storage<Variant>(count, types, offsets, get_data(), other.get_data());
       }
     }
 
@@ -490,7 +602,8 @@ namespace varvec::storage {
       bytes(other.bytes),
       count(other.count),
       offset(other.offset),
-      meta(std::move(other.meta)),
+      types(std::move(other.types)),
+      offsets(std::move(other.offsets)),
       data(std::move(other.data))
     {
       other.bytes = 0;
@@ -501,8 +614,8 @@ namespace varvec::storage {
     ~dynamic_storage() noexcept {
       while (this->count) {
         auto const curr_count = --this->count;
-        auto const curr_type = this->meta[curr_count].type;
-        auto const curr_offset = this->meta[curr_count].offset;
+        uint8_t const curr_type = this->types[curr_count];
+        auto const curr_offset = this->offsets[curr_count];
         auto* const curr_ptr = this->get_data() + curr_offset;
         get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
           value->~T();
@@ -541,15 +654,16 @@ namespace varvec::storage {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         memcpy(newdata.get(), data.get(), bytes);
       } else if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
-        move_storage<Variant>(count, meta, newdata.get(), data.get());
+        move_storage<Variant>(count, types, offsets, newdata.get(), data.get());
       } else {
-        copy_storage<Variant>(count, meta, newdata.get(), data.get());
+        copy_storage<Variant>(count, types, offsets, newdata.get(), data.get());
       }
 
       // Update
       data = std::move(newdata);
       bytes = newsize;
-      meta.resize(meta.size() * scale);
+      types.resize(types.size() * scale);
+      offsets.resize(types.size() * scale);
       return get_data() + offset;
     }
 
@@ -558,7 +672,7 @@ namespace varvec::storage {
     }
 
     size_t size() const noexcept {
-      return buffer_size() + (sizeof(storage_metadata<size_type>) * meta.size());
+      return buffer_size() + (sizeof(uint8_t) * types.size()) + (sizeof(size_type) * offsets.size());
     }
 
     bool has_space(size_t more) const noexcept {
@@ -568,7 +682,8 @@ namespace varvec::storage {
     size_type bytes {start_size};
     size_type count {0};
     size_type offset {0};
-    std::vector<storage_metadata<size_type>> meta;
+    std::vector<uint8_t> types;
+    std::vector<size_type> offsets;
     std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> data;
 
   };
@@ -667,7 +782,7 @@ namespace varvec {
         storage(storage)
       {}
 
-      void init_check() const {
+      void init_check() const noexcept(!throws) {
         if constexpr (throws) {
           if (!storage) {
             throw std::runtime_error("varvec::vector::iterator was accessed uninitialized");
@@ -827,8 +942,8 @@ namespace varvec {
           // Will align at native requirements
           new(data_ptr) stored_type(std::forward<ValueType>(val));
         }
-        impl.meta[curr_count].type = meta::index_of_v<stored_type, Types...>;
-        impl.meta[curr_count].offset = offset;
+        impl.types[curr_count] = meta::index_of_v<stored_type, Types...>;
+        impl.offsets[curr_count] = offset;
         impl.incr_offset(required_bytes);
       }
 
@@ -842,9 +957,10 @@ namespace varvec {
         // Disable it if you must :)
         bounds_check(index);
 
-        auto const& meta = impl.meta[index];
-        auto* const curr_ptr = impl.get_data() + meta.offset;
-        storage::get_aligned_ptr_for(meta.type, curr_ptr,
+        uint8_t const type = impl.types[index];
+        auto const offset = impl.offsets[index];
+        auto* const curr_ptr = impl.get_data() + offset;
+        storage::get_aligned_ptr_for(type, curr_ptr,
             meta::identity<logical_type> {}, [&] <class T> (T* ptr) {
           std::forward<Func>(callback)(*ptr);
         });
@@ -942,9 +1058,11 @@ namespace varvec {
         // Disable it if you must :)
         bounds_check(0);
 
-        auto const& meta = impl.meta[--impl.count];
-        auto* const curr_ptr = impl.get_data() + meta.offset;
-        storage::get_aligned_ptr_for(meta.type, curr_ptr,
+        auto const curr_idx = --impl.count;
+        uint8_t const type = impl.types[curr_idx];
+        auto const offset = impl.offsets[curr_idx];
+        auto* const curr_ptr = impl.get_data() + offset;
+        storage::get_aligned_ptr_for(type, curr_ptr,
             meta::identity<logical_type> {}, [] <class T> (T* ptr) {
           ptr->~T();
         });
@@ -955,9 +1073,10 @@ namespace varvec {
         // Disable it if you must :)
         bounds_check(index);
 
-        auto const& meta = impl.meta[index];
-        auto* const curr_ptr = impl.get_data() + meta.offset;
-        return storage::get_aligned_ptr_for(meta.type, curr_ptr,
+        uint8_t const type = impl.types[index];
+        auto const offset = impl.offsets[index];
+        auto* const curr_ptr = impl.get_data() + offset;
+        return storage::get_aligned_ptr_for(type, curr_ptr,
             meta::identity<logical_type> {}, [] <class T> (T const* ptr) -> value_type {
           if constexpr (std::copyable<T>) return *ptr;
           else return ptr;
@@ -1020,7 +1139,7 @@ namespace varvec {
 
     private:
 
-      void bounds_check(size_t index) const {
+      void bounds_check(size_t index) const noexcept(!throws) {
         if constexpr (throws) {
           if (index >= size()) {
             std::string msg = "varvec::vector was indexed out of bounds. ";

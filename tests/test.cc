@@ -23,7 +23,7 @@ using trivial_vector = varvec::static_vector<32, 8, bool, int, float>;
 using unsafe_trivial_vector = unsafe_static_vector<32, 8, bool, int, float>;
 
 static_assert(
-  sizeof(trivial_vector) == 32 + (8 * 2) + 4
+  sizeof(trivial_vector) == 32 + 8 + 2 + 2
 );
 
 static_assert(
