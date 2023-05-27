@@ -235,8 +235,10 @@ namespace varvec::storage {
       packed_bitvec* container;
     };
 
-    static_assert(meta::necessary_bits_for<bits_per_entry>() <= 8,
-        "packed_bitvec can only encode representations of up to 1 byte");
+    static constexpr bool bpe = bits_per_entry;
+    static_assert(bpe == 1 || bpe == 2 || bpe == 4 || bpe == 8,
+        "packed_bitvec can only encode representations of up to 1 byte, "
+        "and can only handle byte subdivisions that are on even powers of two");
 
     static constexpr size_t total_bytes = meta::int_ceil((bits_per_entry * memcount) / CHAR_BIT);
 
