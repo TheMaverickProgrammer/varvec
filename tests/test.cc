@@ -3,37 +3,23 @@
 
 #include "../varvec.hpp"
 
-template <size_t max_bytes, size_t memcount, std::movable... Types>
-using unsafe_static_vector = varvec::basic_variable_vector<
-  false,
-  varvec::storage::static_storage_context<max_bytes, memcount>::template static_storage,
-  std::variant,
-  Types...
->;
-
-template <std::movable... Types>
-using unsafe_dynamic_vector = varvec::basic_variable_vector<
-  false,
-  varvec::storage::default_dynamic_storage,
-  std::variant,
-  Types...
->;
-
 using trivial_vector = varvec::static_vector<32, 8, bool, int, float>;
-using unsafe_trivial_vector = unsafe_static_vector<32, 8, bool, int, float>;
 
 static_assert(
   sizeof(trivial_vector) == 32 + 8 + 2 + 2
 );
 
 static_assert(
-  noexcept(std::declval<unsafe_trivial_vector>()[0])
+  noexcept(std::declval<trivial_vector>()[0])
 );
 static_assert(
-  noexcept(std::declval<unsafe_trivial_vector>().get_at<bool>(0))
+  noexcept(std::declval<trivial_vector>().get<bool>(0))
 );
 static_assert(
-  noexcept(std::declval<unsafe_trivial_vector>().visit_at(0, [] (auto&) noexcept {}))
+  noexcept(std::declval<trivial_vector>().visit(0, [] (auto&) noexcept {}))
+);
+static_assert(
+  !noexcept(std::declval<trivial_vector>().visit(0, [] (auto&) {}))
 );
 
 static_assert(
@@ -41,7 +27,6 @@ static_assert(
 );
 
 using copyable_vector = varvec::static_vector<128, 4, bool, int, float, std::string>;
-using unsafe_copyable_vector = unsafe_static_vector<128, 4, bool, int, float, std::string>;
 
 static_assert(
   !std::is_trivially_destructible_v<copyable_vector>
@@ -50,9 +35,17 @@ static_assert(
   &&
   std::movable<copyable_vector>
 );
+static_assert(
+  noexcept(std::declval<copyable_vector>().get<bool>(0))
+);
+static_assert(
+  noexcept(std::declval<copyable_vector>().visit(0, [] (auto&) noexcept {}))
+);
+static_assert(
+  !noexcept(std::declval<copyable_vector>().visit(0, [] (auto&) {}))
+);
 
 using movable_vector = varvec::static_vector<128, 4, bool, int, float, std::string, std::unique_ptr<double>>;
-using unsafe_movable_vector = unsafe_static_vector<128, 4, bool, int, float, std::string, std::unique_ptr<double>>;
 
 static_assert(
   !std::is_trivially_destructible_v<movable_vector>
@@ -61,9 +54,17 @@ static_assert(
   &&
   std::movable<movable_vector>
 );
+static_assert(
+  noexcept(std::declval<movable_vector>().get<bool>(0))
+);
+static_assert(
+  noexcept(std::declval<movable_vector>().visit(0, [] (auto&) noexcept {}))
+);
+static_assert(
+  !noexcept(std::declval<movable_vector>().visit(0, [] (auto&) {}))
+);
 
 using dynamic_copyable_vector = varvec::vector<bool, int, float, std::string>;
-using unsafe_dynamic_copyable_vector = unsafe_dynamic_vector<bool, int, float, std::string>;
 
 static_assert(
   !std::is_trivially_destructible_v<dynamic_copyable_vector>
@@ -74,7 +75,6 @@ static_assert(
 );
 
 using dynamic_movable_vector = varvec::vector<bool, int, float, std::string, std::unique_ptr<double>>;
-using unsafe_dynamic_movable_vector = unsafe_dynamic_vector<bool, int, float, std::string, std::unique_ptr<double>>;
 
 static_assert(
   !std::is_trivially_destructible_v<dynamic_movable_vector>
@@ -93,8 +93,7 @@ TEST_CASE("construction properties", "[varvec tests]") {
     REQUIRE(vec.used_bytes() > 0);
     REQUIRE(vec.begin() == vec.end());
 
-    REQUIRE_THROWS_AS(vec[0], std::out_of_range);
-    REQUIRE_THROWS_AS(*vecit, std::out_of_range);
+    REQUIRE_THROWS_AS(vec.at(0), std::out_of_range);
 
     if constexpr (std::copyable<V>) {
       auto copy = vec;
@@ -105,8 +104,7 @@ TEST_CASE("construction properties", "[varvec tests]") {
       REQUIRE(copy.begin() == copy.end());
       REQUIRE(copy == vec);
 
-      REQUIRE_THROWS_AS(copy[0], std::out_of_range);
-      REQUIRE_THROWS_AS(*vecit, std::out_of_range);
+      REQUIRE_THROWS_AS(copy.at(0), std::out_of_range);
     }
   };
   asserts(varvec::meta::identity<trivial_vector> {});
@@ -288,8 +286,8 @@ TEST_CASE("mutation", "varvec tests") {
 
 #ifdef VARVEC_BENCHMARK
 TEST_CASE("performance", "varvec benchmarks") {
-  unsafe_copyable_vector vec;
-  unsafe_dynamic_copyable_vector dvec;
+  copyable_vector vec;
+  dynamic_copyable_vector dvec;
   std::vector<std::variant<bool, int, float, std::string>> stdvec;
 
   vec.push_back(bool(rand() % 2));
@@ -346,30 +344,30 @@ TEST_CASE("performance", "varvec benchmarks") {
     return stdvec[3];
   };
 
-  BENCHMARK("static vector bool get_at") {
-    return vec.get_at<bool>(0);
+  BENCHMARK("static vector bool get") {
+    return vec.get<bool>(0);
   };
-  BENCHMARK("static vector int get_at") {
-    return vec.get_at<int>(1);
+  BENCHMARK("static vector int get") {
+    return vec.get<int>(1);
   };
-  BENCHMARK("static vector float get_at") {
-    return vec.get_at<float>(2);
+  BENCHMARK("static vector float get") {
+    return vec.get<float>(2);
   };
-  BENCHMARK("static vector std::string get_at") {
-    return vec.get_at<std::string>(3);
+  BENCHMARK("static vector std::string get") {
+    return vec.get<std::string>(3);
   };
 
-  BENCHMARK("dynamic vector bool get_at") {
-    return dvec.get_at<bool>(0);
+  BENCHMARK("dynamic vector bool get") {
+    return dvec.get<bool>(0);
   };
-  BENCHMARK("dynamic vector int get_at") {
-    return dvec.get_at<int>(1);
+  BENCHMARK("dynamic vector int get") {
+    return dvec.get<int>(1);
   };
-  BENCHMARK("dynamic vector float get_at") {
-    return dvec.get_at<float>(2);
+  BENCHMARK("dynamic vector float get") {
+    return dvec.get<float>(2);
   };
-  BENCHMARK("dynamic vector std::string get_at") {
-    return dvec.get_at<std::string>(3);
+  BENCHMARK("dynamic vector std::string get") {
+    return dvec.get<std::string>(3);
   };
 
   BENCHMARK("std::vector<std::variant> bool std::get") {
