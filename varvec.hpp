@@ -887,6 +887,9 @@ namespace varvec::storage {
       unpacked_type_storage
     >;
 
+    // Interface type with which to access rebuildable offset storage.
+    using offset_storage = std::unique_ptr<offsets::virtual_offset_storage>;
+
     // Make the optimistic choice that the user will store smaller things,
     // will rebuild if wrong
     using initial_offset_storage = offsets::concrete_offset_storage<
@@ -894,6 +897,8 @@ namespace varvec::storage {
     >;
 
     using deleter = aligned_deleter<uint8_t, std::align_val_t(max_alignment)>;
+
+    using data_storage = std::unique_ptr<uint8_t[], deleter>;
 
     dynamic_storage() :
       bytes(start_size),
@@ -1043,8 +1048,8 @@ namespace varvec::storage {
     size_type offset;
 
     type_storage types;
-    std::unique_ptr<offsets::virtual_offset_storage> offsets;
-    std::unique_ptr<uint8_t[], deleter> data;
+    offset_storage offsets;
+    data_storage data;
 
   };
 

@@ -4,16 +4,21 @@ dist: jammy
 
 before_install:
   - sudo apt-get -qq update
-  - sudo apt-get install -y g++-10 gcc-10 cmake
+  - sudo apt-get install -y g++-10 gcc-10 cmake python3 python3-pip
   - git clone https://github.com/catchorg/Catch2.git
   - cd Catch2
   - cmake -Bbuild -H. -DBUILD_TESTING=OFF
   - sudo cmake --build build/ -j $(nproc) --target install
   - cd ..
+  - pip install --user cpp-coveralls
 
 script:
   - mkdir build
   - cd build
-  - CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 cmake ..
+  - CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 cmake .. -Dcoverage=ON
   - make
   - ctest --verbose
+  - cd ..
+
+after_success:
+  - coveralls -r . -b build/ -i . --gcov-options '\-lp'
