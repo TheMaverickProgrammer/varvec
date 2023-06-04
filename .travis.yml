@@ -21,4 +21,4 @@ script:
   - cd ..
 
 after_success:
-  - coveralls -r . -b build/ -i . -E '.*[Cc]atch.*' -E '.*CMakeFiles.*' -E 'tests' --gcov-options '\-lp'
+  - coveralls -r . -b build/ -i . -E '.*[Cc]atch.*' -E '.*CMakeFiles.*' -E '.*tests.*' --gcov /usr/bin/gcov-10 --gcov-options '\-lp'
