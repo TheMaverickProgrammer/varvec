@@ -1,6 +1,7 @@
 # Variable Vectors
 
 [![Build Status](https://app.travis-ci.com/Cfretz244/varvec.svg?branch=master)](https://app.travis-ci.com/Cfretz244/varvec)
+[![Coverage Status](https://coveralls.io/repos/github/Cfretz244/varvec/badge.svg?branch=)](https://coveralls.io/github/Cfretz244/varvec?branch=)
 
 The idea behind this repository is to implement a set of "variable vector" types,
 built on top of `std::variant` machinery (although extensible to any type that implements
