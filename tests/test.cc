@@ -274,10 +274,12 @@ TEST_CASE("mutation", "varvec tests") {
       [] (auto&) { REQUIRE(false); }
     });
     REQUIRE(std::get<std::string>(vec[3]) == "hello life");
+    REQUIRE(vec.template get<std::string>(3) == "hello life");
     REQUIRE(vec.template get_at<std::string>(3) == "hello life");
 
     if constexpr (std::copyable<V>) {
       auto const copy = vec;
+      REQUIRE(copy.template get<std::string>(3) == "hello life");
       REQUIRE(copy.template get_at<std::string>(3) == "hello life");
     }
 
@@ -290,10 +292,12 @@ TEST_CASE("mutation", "varvec tests") {
       [] (auto&) { REQUIRE(false); }
     });
     REQUIRE(std::get<float>(vec[2]) == 42.0);
+    REQUIRE(vec.template get<float>(2) == 42.0);
     REQUIRE(vec.template get_at<float>(2) == 42.0);
 
     if constexpr (std::copyable<V>) {
       auto const copy = vec;
+      REQUIRE(copy.template get<float>(2) == 42.0);
       REQUIRE(copy.template get_at<float>(2) == 42.0);
     }
 
@@ -306,6 +310,7 @@ TEST_CASE("mutation", "varvec tests") {
       [] (auto&) { REQUIRE(false); }
     });
     REQUIRE(std::get<int>(vec[1]) == 1337);
+    REQUIRE(vec.template get<int>(1) == 1337);
     REQUIRE(vec.template get_at<int>(1) == 1337);
 
     vec.visit(0, varvec::overload {
@@ -317,9 +322,11 @@ TEST_CASE("mutation", "varvec tests") {
       [] (auto&) { REQUIRE(false); }
     });
     REQUIRE(std::get<bool>(vec[0]) == 0);
+    REQUIRE(vec.template get<bool>(0) == 0);
     REQUIRE(vec.template get_at<bool>(0) == 0);
 
-    vec.template get_at<std::string>(3) = "hello c++";
+    vec.template get<std::string>(3) = "hello c++";
+    REQUIRE(vec.template get<std::string>(3) == "hello c++");
     REQUIRE(vec.template get_at<std::string>(3) == "hello c++");
   };
   asserts(varvec::meta::identity<copyable_vector> {});
