@@ -4,7 +4,7 @@ dist: jammy
 
 before_install:
   - sudo apt-get -qq update
-  - sudo apt-get install -y g++-10 gcc-10 cmake python3 python3-pip
+  - sudo apt-get install -y cmake python3 python3-pip
   - git clone https://github.com/catchorg/Catch2.git
   - cd Catch2
   - cmake -Bbuild -H. -DBUILD_TESTING=OFF
@@ -15,10 +15,10 @@ before_install:
 script:
   - mkdir build
   - cd build
-  - CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 cmake .. -Dcoverage=ON -DCMAKE_BUILD_TYPE=Debug
+  - cmake .. -Dcoverage=ON -DCMAKE_BUILD_TYPE=Debug
   - make
-  - ctest --verbose
+  - ctest --output-on-failure
   - cd ..
 
 after_success:
-  - coveralls -r . -b build/ -i . -E '.*[Cc]atch.*' -E '.*CMakeFiles.*' -E '.*tests.*' --gcov /usr/bin/gcov-10 --gcov-options '\-lp'
+  - coveralls -r . -b build/ -i varvec.hpp --gcov-options '\-lp'
