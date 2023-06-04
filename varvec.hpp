@@ -220,8 +220,9 @@ namespace varvec::meta {
 
 }
 
-namespace varvec::storage {
+namespace varvec::storage::offsets {
 
+  // Virtual interface type for offset storage.
   struct virtual_offset_storage {
 
     using size_type = size_t;
@@ -244,6 +245,20 @@ namespace varvec::storage {
 
   };
 
+  // Class implements offset storage in the dynamic case.
+  //
+  // For static vectors, we can pre-compute the minimum integer size that can represent
+  // any possible offset we might be asked to store, but for a dynamic vector this is
+  // a runtime property.
+  //
+  // The offset store is the single-largest data storage requirement we have, and so
+  // optimizing it to use the minimum integer representation possible is a significant
+  // storage win.
+  //
+  // This class, and the interface above, allow the dynamic storage implementation to
+  // "hot swap" its offset storage format at runtime, allowing us to use the minimum
+  // space necessary based on the runtime conditions of the vector, growing and
+  // reforming offsets as the storage offsets grow.
   template <class OffsetType>
   struct concrete_offset_storage final : virtual_offset_storage {
 
@@ -268,6 +283,9 @@ namespace varvec::storage {
       storage[index] = offset;
     }
 
+    // Function computes whether the OffsetType of this concrete offset storage
+    // can represent the given offset that's about to be stored, or if the offset
+    // storage will have to be rebuilt to do so.
     bool can_handle(size_type offset) const noexcept final {
       return offset <= std::numeric_limits<OffsetType>::max();
     }
@@ -276,6 +294,8 @@ namespace varvec::storage {
       return std::make_unique<concrete_offset_storage>(*this);
     }
 
+    // Function handles rebuilding the offset storage in the case that the caller
+    // is trying to store an offset that's larger than our current representation type.
     std::unique_ptr<virtual_offset_storage> realloc_for(size_type offset) const final {
       auto realloc_offsets = [this] <class T> () -> std::unique_ptr<virtual_offset_storage> {
         // Copy has to be done while we have full type information
@@ -316,6 +336,10 @@ namespace varvec::storage {
     std::vector<OffsetType> storage;
 
   };
+
+}
+
+namespace varvec::storage {
 
   // The dynamic storage implementation uses aligned-new to allocate memory,
   // which means it has to be paired with aligned-delete, which means I can't
@@ -863,7 +887,7 @@ namespace varvec::storage {
       unpacked_type_storage
     >;
 
-    using initial_offset_storage = concrete_offset_storage<
+    using initial_offset_storage = offsets::concrete_offset_storage<
       meta::smallest_type_for_t<meta::max_size_of(meta::identity<variant_type> {})>
     >;
 
@@ -1017,7 +1041,7 @@ namespace varvec::storage {
     size_type offset;
 
     type_storage types;
-    std::unique_ptr<virtual_offset_storage> offsets;
+    std::unique_ptr<offsets::virtual_offset_storage> offsets;
     std::unique_ptr<uint8_t[], deleter> data;
 
   };
