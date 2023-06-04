@@ -225,10 +225,10 @@ namespace varvec::storage {
     static_bitvec_storage(static_bitvec_storage const&) = default;
     ~static_bitvec_storage() = default;
 
-    [[noreturn]] void resize(size_t) noexcept {
+    void resize(size_t) noexcept {
       // XXX: Not sure if this is the right move.
       // This is so that I can mark push_back noexcept in the static case.
-      std::abort();
+      assert(false);
     }
 
     constexpr size_t size() const noexcept {
@@ -286,7 +286,7 @@ namespace varvec::storage {
 
     static constexpr bool bpe = bits_per_entry;
     static_assert(bpe == 1 || bpe == 2 || bpe == 4 || bpe == 8,
-        "packed_bitvec can only encode representations of up to 1 byte, "
+        "varvec bit vectors can only encode representations of up to 1 byte, "
         "and can only handle byte subdivisions that are on even powers of two");
 
     byte_proxy operator [](size_t index) noexcept {
@@ -428,6 +428,7 @@ namespace varvec::storage {
 
       if constexpr (std::copyable<stored_type>) {
         if (!storage::aligned_for_type<stored_type>(ptr)) {
+          // XXX: Kind of janky
           // Propagates changes back if the user changes anything.
           struct change_forwarder {
             using target_type = std::conditional_t<
@@ -618,11 +619,27 @@ namespace varvec::storage {
       offset += count;
     }
 
-    [[noreturn]] uint8_t* resize(size_t) noexcept {
+    uint8_t* resize(size_t) noexcept {
       // XXX: Not sure if this is the right move.
-      // This is so that I can mark push_back noexcept in the static case.
-      std::abort();
-      __builtin_unreachable();
+      // I was originally throwing std::bad_alloc here, which seems like a nicer solution.
+      //
+      // This is so that I can mark push_back noexcept in the trivial, static, case.
+      // For statically sized vectors with trivial contents (ints, doubles, floats, etc),
+      // having this function marked noexcept appears to be a meaningful optimization,
+      // (at least on clang 14) allowing the compiler to become _significantly_ more aggressive
+      // in inlining and optimizing, potentially allowing the _entire data structure_ to
+      // get optimized out.
+      //
+      // If the user builds with -DNDEBUG we also still need to return something here or we'll
+      // get a compile warning. It's a logical error to call this function, and would mean
+      // the caller tried to overflow a statically sized vector. We could return the proper
+      // pointer and let the caller overflow, but this would likely result in much harder
+      // to track down bugs stemming from memory corruption.
+      //
+      // Returning a nullptr here almost guarantees an immediate crash in push_back, where it
+      // should hopefully be more obvious what's gone wrong.
+      assert(false);
+      return nullptr;
     }
 
     size_t buffer_size() const noexcept {
@@ -1054,21 +1071,14 @@ namespace varvec {
         // For details, check paper P0608R3.
         using stored_type = meta::fuzzy_type_match_t<ValueType, Types...>;
 
-        auto& offset = impl.offset;
-        auto* const base_ptr = impl.get_data() + offset;
-        auto* data_ptr = base_ptr;
-
-        // Figure out how much space we'll need.
-        auto const required_bytes = sizeof(stored_type);
-        if constexpr (!std::is_trivially_copyable_v<stored_type>) {
-          data_ptr = storage::realign_for_type<stored_type>(data_ptr);
-        }
-        auto const alignment_bytes = data_ptr - base_ptr;
+        // Figure out where we'll store this thing, taking into account
+        // whether it needs to be aligned.
+        auto [data_ptr, alignment_bytes] = find_storage_base<stored_type, false>();
 
         // Check if we have it.
-        while (!impl.has_space(required_bytes + alignment_bytes)) {
+        while (!impl.has_space(sizeof(stored_type) + alignment_bytes)) {
           // FIXME: Rethink grow strategy
-          // This will abort for static vector
+          // Static vector returns null on overflow. Will crash below.
           data_ptr = impl.resize(2);
         }
 
@@ -1076,14 +1086,16 @@ namespace varvec {
         auto const curr_count = impl.count++;
         if constexpr (std::is_trivially_copyable_v<stored_type>) {
           // May copy to a misaligned address
+          // If you crash here you overflowed a static vector.
           memcpy(data_ptr, &val, sizeof(stored_type));
         } else {
           // Will align at native requirements
+          // If you crash here you overflowed a static vector.
           new(data_ptr) stored_type(std::forward<ValueType>(val));
         }
         impl.types[curr_count] = meta::index_of_v<stored_type, Types...>;
-        impl.offsets[curr_count] = offset;
-        impl.incr_offset(required_bytes);
+        impl.offsets[curr_count] = impl.offset;
+        impl.incr_offset(sizeof(stored_type));
       }
 
       void pop_back() {
@@ -1122,11 +1134,14 @@ namespace varvec {
       void visit(size_type index, Func&& callback)
         noexcept(nothrow_exhaustive_visitor_v<Func>)
       {
+        // Very carefully forwarding noexcept here because it seems to make a difference.
+        constexpr bool is_noexcept = noexcept(nothrow_exhaustive_visitor_v<Func>);
+
         uint8_t const type = impl.types[index];
         auto const offset = impl.offsets[index];
         auto* const curr_ptr = impl.get_data() + offset;
         storage::get_aligned_ptr_for(type, curr_ptr,
-            meta::identity<logical_type> {}, [&] <class T> (T* ptr) {
+            meta::identity<logical_type> {}, [&] <class T> (T* ptr) noexcept(is_noexcept) {
           std::forward<Func>(callback)(*ptr);
         });
       }
@@ -1138,7 +1153,10 @@ namespace varvec {
       void visit(size_type index, Func&& callback) const
         noexcept(nothrow_exhaustive_visitor_v<Func>)
       {
-        const_cast<basic_variable_vector*>(this)->visit(index, [&] <class T> (T& val) {
+        // Very carefully forwarding noexcept here because it seems to make a difference.
+        constexpr bool is_noexcept = noexcept(nothrow_exhaustive_visitor_v<Func>);
+
+        const_cast<basic_variable_vector*>(this)->visit(index, [&] <class T> (T& val) noexcept(is_noexcept) {
           std::forward<Func>(callback)(const_cast<T const&>(val));
         });
       }
@@ -1195,12 +1213,12 @@ namespace varvec {
       template <class T>
       requires nontrivial_get_reqs_v<T>
       T& get(size_type index) & noexcept {
+        // XXX: Will crash below if you call this on the wrong type. The cost of noexcept.
+        // If you want exceptions, call get_at.
         T* ptr = nullptr;
         visit(index, [&] <class U> (U& val) noexcept {
           if constexpr (std::is_same_v<U, T>) {
             ptr = &val;
-          } else {
-            std::abort();
           }
         });
         return *ptr;
@@ -1239,12 +1257,15 @@ namespace varvec {
       template <class T>
       requires trivial_get_reqs_v<T>
       T get(size_type index) const noexcept {
-        T retval;
+        // XXX: Will return value-initialized T if the type is mismatched.
+        // If you want exceptions call get_at.
+        T retval {};
+
+        // FIXME: This could be done more efficiently. We're searching for a type
+        // match 
         visit(index, [&] <class U> (U const& val) noexcept {
           if constexpr (std::is_same_v<U, T>) {
             retval = val;
-          } else {
-            std::abort();
           }
         });
         return retval;
@@ -1330,6 +1351,29 @@ namespace varvec {
         return size() == 0;
       }
 
+      template <class ValueType>
+      requires std::is_same_v<std::decay_t<ValueType>, logical_type>
+      bool has_space(ValueType const& val) const noexcept {
+        return std::visit([&] (auto& arg) { return has_space(arg); });
+      }
+
+      template <class ValueType>
+      requires (
+          std::is_constructible_v<logical_type, ValueType>
+          &&
+          !std::is_same_v<std::decay_t<ValueType>, logical_type>
+      )
+      bool has_space(ValueType const&) const noexcept {
+        // Compute the type we would store for this argument
+        using stored_type = meta::fuzzy_type_match_t<ValueType, Types...>;
+
+        // Figure out if we need space for alignment
+        auto [_, alignment_bytes] = find_storage_base<stored_type>();
+
+        // Check if we have it.
+        return impl.has_space(sizeof(stored_type) + alignment_bytes);
+      }
+
       size_type used_bytes() const noexcept {
         return impl.size();
       }
@@ -1343,6 +1387,26 @@ namespace varvec {
       }
 
     private:
+
+      template <class ValueType, bool is_const = true>
+      auto find_storage_base() const noexcept {
+        auto& offset = impl.offset;
+        auto* const base_ptr = impl.get_data() + offset;
+        auto* data_ptr = base_ptr;
+
+        // Figure out how much space we'll need.
+        auto const required_bytes = sizeof(ValueType);
+        if constexpr (!std::is_trivially_copyable_v<ValueType>) {
+          data_ptr = storage::realign_for_type<ValueType>(data_ptr);
+        }
+        auto const alignment_bytes = data_ptr - base_ptr;
+
+        if constexpr (is_const) {
+          return std::tuple {data_ptr, alignment_bytes};
+        } else {
+          return std::tuple {const_cast<uint8_t*>(data_ptr), alignment_bytes};
+        }
+      }
 
       void bounds_check(size_t index) const {
         if (index >= size()) {
