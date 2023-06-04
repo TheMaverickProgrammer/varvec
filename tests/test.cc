@@ -329,7 +329,15 @@ TEST_CASE("mutation", "varvec tests") {
 }
 
 TEST_CASE("resize", "varvec tests") {
-  dynamic_copyable_vector vec(4);
+  struct big_data {
+    big_data() : big_dumb_data {0} {}
+    bool operator ==(big_data const&) const = default;
+    std::array<char, 4096> big_dumb_data;
+  };
+  using value = std::variant<bool, int, float, std::string, big_data>;
+  using big_data_vector = varvec::vector<bool, int, float, std::string, big_data>;
+
+  big_data_vector vec(4);
   REQUIRE(vec.capacity() == 4);
 
   for (int i = 0; i < 5; i++) {
@@ -337,6 +345,20 @@ TEST_CASE("resize", "varvec tests") {
   }
   REQUIRE(vec.size() == 5);
   REQUIRE(vec.capacity() == 8);
+
+  int count = 0;
+  for (auto val : vec) {
+    REQUIRE(val == value {count++});
+  }
+
+  for (int i = 0; i < 5; i++) {
+    vec.push_back(big_data {});
+  }
+  REQUIRE(vec.size() == 10);
+
+  for (int i = 5; i < 10; i++) {
+    REQUIRE(vec[i] == value {big_data {}});
+  }
 }
 
 #ifdef VARVEC_BENCHMARK

@@ -245,18 +245,18 @@ namespace varvec::storage::offsets {
 
   };
 
-  // Class implements offset storage in the dynamic case.
+  // Class implements packed offset storage in the dynamic case.
   //
   // For static vectors, we can pre-compute the minimum integer size that can represent
   // any possible offset we might be asked to store, but for a dynamic vector this is
-  // a runtime property.
+  // not possible as maximum offset is a runtime property.
   //
-  // The offset store is the single-largest data storage requirement we have, and so
-  // optimizing it to use the minimum integer representation possible is a significant
-  // storage win.
+  // The offset store is the single-largest data storage requirement we have, other than
+  // the data array itself, and so optimizing it to use the minimum integer representation
+  // possible is a _significant_ storage win.
   //
-  // This class, and the interface above, allow the dynamic storage implementation to
-  // "hot swap" its offset storage format at runtime, allowing us to use the minimum
+  // This class, and the interface above, allows the dynamic vector storage implementation
+  // to "hot swap" its offset storage format at runtime, allowing us to use the minimum
   // space necessary based on the runtime conditions of the vector, growing and
   // reforming offsets as the storage offsets grow.
   template <class OffsetType>
@@ -887,8 +887,10 @@ namespace varvec::storage {
       unpacked_type_storage
     >;
 
+    // Make the optimistic choice that the user will store smaller things,
+    // will rebuild if wrong
     using initial_offset_storage = offsets::concrete_offset_storage<
-      meta::smallest_type_for_t<meta::max_size_of(meta::identity<variant_type> {})>
+      meta::smallest_type_for_t<meta::min_size_of(meta::identity<variant_type> {})>
     >;
 
     using deleter = aligned_deleter<uint8_t, std::align_val_t(max_alignment)>;
