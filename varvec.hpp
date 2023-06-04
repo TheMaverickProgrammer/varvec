@@ -297,7 +297,7 @@ namespace varvec::storage::offsets {
     // Function handles rebuilding the offset storage in the case that the caller
     // is trying to store an offset that's larger than our current representation type.
     std::unique_ptr<virtual_offset_storage> realloc_for(size_type offset) const final {
-      auto realloc_offsets = [this] <class T> () -> std::unique_ptr<virtual_offset_storage> {
+      auto realloc_offsets = [this] <class T> (meta::identity<T>) {
         // Copy has to be done while we have full type information
         // so the promotions are handled properly.
         auto ptr = std::make_unique<concrete_offset_storage<T>>(size());
@@ -306,14 +306,14 @@ namespace varvec::storage::offsets {
       };
 
       if (offset <= std::numeric_limits<uint8_t>::max()) {
-        return realloc_offsets.template operator ()<uint8_t>();
+        return realloc_offsets(meta::identity<uint8_t> {});
       } else if (offset <= std::numeric_limits<uint16_t>::max()) {
-        return realloc_offsets.template operator ()<uint16_t>();
+        return realloc_offsets(meta::identity<uint16_t> {});
       } else if (offset <= std::numeric_limits<uint32_t>::max()) {
-        return realloc_offsets.template operator ()<uint32_t>();
+        return realloc_offsets(meta::identity<uint32_t> {});
       } else {
         assert(offset <= std::numeric_limits<uint64_t>::max());
-        return realloc_offsets.template operator ()<uint64_t>();
+        return realloc_offsets(meta::identity<uint64_t> {});
       }
     }
 
