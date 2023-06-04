@@ -74,6 +74,9 @@ namespace varvec::meta {
     }
   }
 
+  template <size_t num>
+  using smallest_type_for_t = typename decltype(smallest_type_for<num>())::type;
+
   template <auto num>
   constexpr auto necessary_bits_for() noexcept {
     if (num == 0) return decltype(num) {1U};
@@ -109,9 +112,6 @@ namespace varvec::meta {
     int64_t casted = static_cast<int64_t>(val);
     return val > casted ? casted + 1 : val;
   }
-
-  template <size_t num>
-  using smallest_type_for_t = typename decltype(smallest_type_for<num>())::type;
 
   template <class... Ts>
   struct simulated_overload_resolution_impl {
@@ -221,6 +221,101 @@ namespace varvec::meta {
 }
 
 namespace varvec::storage {
+
+  struct virtual_offset_storage {
+
+    using size_type = size_t;
+
+    virtual ~virtual_offset_storage() {}
+
+    virtual size_type operator [](size_type index) const noexcept = 0;
+
+    virtual size_type get(size_type index) const noexcept = 0;
+    virtual void set(size_type index, size_type offset) noexcept = 0;
+
+    virtual bool can_handle(size_type offset) const noexcept = 0;
+    virtual std::unique_ptr<virtual_offset_storage> clone() const = 0;
+    virtual std::unique_ptr<virtual_offset_storage> realloc_for(size_type offset) const = 0;
+    virtual void resize(size_type members) = 0;
+
+    virtual size_type size() const noexcept = 0;
+    virtual size_type capacity() const noexcept = 0;
+    virtual size_type used_bytes() const noexcept = 0;
+
+  };
+
+  template <class OffsetType>
+  struct concrete_offset_storage final : virtual_offset_storage {
+
+    using size_type = virtual_offset_storage::size_type;
+
+    explicit concrete_offset_storage(size_type members) : storage(members) {}
+    concrete_offset_storage(concrete_offset_storage const&) = default;
+    concrete_offset_storage(concrete_offset_storage&&) = default;
+    ~concrete_offset_storage() = default;
+
+    size_type operator [](size_type index) const noexcept final {
+      assert(index < size());
+      return storage[index];
+    }
+
+    size_type get(size_type index) const noexcept final {
+      return (*this)[index];
+    }
+
+    void set(size_type index, size_type offset) noexcept final {
+      assert(index < size());
+      storage[index] = offset;
+    }
+
+    bool can_handle(size_type offset) const noexcept final {
+      return offset <= std::numeric_limits<OffsetType>::max();
+    }
+
+    std::unique_ptr<virtual_offset_storage> clone() const final {
+      return std::make_unique<concrete_offset_storage>(*this);
+    }
+
+    std::unique_ptr<virtual_offset_storage> realloc_for(size_type offset) const final {
+      auto realloc_offsets = [this] <class T> () -> std::unique_ptr<virtual_offset_storage> {
+        // Copy has to be done while we have full type information
+        // so the promotions are handled properly.
+        auto ptr = std::make_unique<concrete_offset_storage<T>>(size());
+        std::copy(storage.begin(), storage.end(), ptr->storage.begin());
+        return ptr;
+      };
+
+      if (offset <= std::numeric_limits<uint8_t>::max()) {
+        return realloc_offsets.template operator ()<uint8_t>();
+      } else if (offset <= std::numeric_limits<uint16_t>::max()) {
+        return realloc_offsets.template operator ()<uint16_t>();
+      } else if (offset <= std::numeric_limits<uint32_t>::max()) {
+        return realloc_offsets.template operator ()<uint32_t>();
+      } else {
+        assert(offset <= std::numeric_limits<uint64_t>::max());
+        return realloc_offsets.template operator ()<uint64_t>();
+      }
+    }
+
+    void resize(size_type members) final {
+      storage.resize(members);
+    }
+
+    size_type size() const noexcept final {
+      return storage.size();
+    }
+
+    size_type capacity() const noexcept final {
+      return storage.capacity();
+    }
+
+    size_type used_bytes() const noexcept final {
+      return storage.capacity() * sizeof(OffsetType);
+    }
+
+    std::vector<OffsetType> storage;
+
+  };
 
   // The dynamic storage implementation uses aligned-new to allocate memory,
   // which means it has to be paired with aligned-delete, which means I can't
@@ -638,7 +733,7 @@ namespace varvec::storage {
 
     ~static_storage_base() = default;
 
-    uint8_t operator [](size_t offset) const noexcept {
+    uint8_t operator [](size_type offset) const noexcept {
       return *(reinterpret_cast<uint8_t const*>(&data) + offset);
     }
 
@@ -650,11 +745,19 @@ namespace varvec::storage {
       return reinterpret_cast<uint8_t const*>(&data);
     }
 
-    void incr_offset(size_t count) noexcept {
+    void set_offset(size_type idx, size_type val) noexcept {
+      offsets[idx] = val;
+    }
+
+    size_type get_offset(size_type idx) const noexcept {
+      return offsets[idx];
+    }
+
+    void incr_offset(size_type count) noexcept {
       offset += count;
     }
 
-    uint8_t* resize(size_t) noexcept {
+    uint8_t* resize(size_type) noexcept {
       // XXX: Not sure if this is the right move.
       // I was originally throwing std::bad_alloc here, which seems like a nicer solution.
       //
@@ -677,19 +780,19 @@ namespace varvec::storage {
       return nullptr;
     }
 
-    size_t buffer_size() const noexcept {
+    size_type buffer_size() const noexcept {
       return bytes;
     }
 
-    size_t size() const noexcept {
+    size_type size() const noexcept {
       return sizeof(types) + sizeof(offsets) + sizeof(data);
     }
 
-    constexpr size_t max_members() const noexcept {
+    constexpr size_type max_members() const noexcept {
       return memcount;
     }
 
-    bool has_space(size_t more) const noexcept {
+    bool has_space(size_type more) const noexcept {
       if (count < memcount) return offset + more <= bytes;
       else return false;
     }
@@ -760,6 +863,10 @@ namespace varvec::storage {
       unpacked_type_storage
     >;
 
+    using initial_offset_storage = concrete_offset_storage<
+      meta::smallest_type_for_t<meta::max_size_of(meta::identity<variant_type> {})>
+    >;
+
     using deleter = aligned_deleter<uint8_t, std::align_val_t(max_alignment)>;
 
     dynamic_storage() :
@@ -767,7 +874,7 @@ namespace varvec::storage {
       count(0),
       offset(0),
       types(start_members),
-      offsets(start_members),
+      offsets(std::make_unique<initial_offset_storage>(start_members)),
       data(new(std::align_val_t(max_alignment)) uint8_t[bytes])
     {}
 
@@ -776,7 +883,7 @@ namespace varvec::storage {
       count(0),
       offset(0),
       types(members),
-      offsets(members),
+      offsets(std::make_unique<initial_offset_storage>(members)),
       data(new(std::align_val_t(max_alignment)) uint8_t[bytes])
     {}
 
@@ -787,13 +894,13 @@ namespace varvec::storage {
       count(other.count),
       offset(other.offset),
       types(other.types),
-      offsets(other.offsets),
+      offsets(other.offsets->clone()),
       data(new (std::align_val_t(max_alignment)) uint8_t[bytes])
     {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         memcpy(get_data(), other.get_data(), bytes);
       } else {
-        copy_storage<Variant>(count, types, offsets, get_data(), other.get_data());
+        copy_storage<Variant>(count, types, *offsets, get_data(), other.get_data());
       }
     }
 
@@ -811,18 +918,18 @@ namespace varvec::storage {
     }
 
     ~dynamic_storage() noexcept {
-      while (this->count) {
-        auto const curr_count = --this->count;
-        uint8_t const curr_type = this->types[curr_count];
-        auto const curr_offset = this->offsets[curr_count];
-        auto* const curr_ptr = this->get_data() + curr_offset;
+      while (count) {
+        auto const curr_count = --count;
+        uint8_t const curr_type = types[curr_count];
+        auto const curr_offset = offsets->get(curr_count);
+        auto* const curr_ptr = get_data() + curr_offset;
         get_typed_ptr_for(curr_type, curr_ptr, meta::identity<Variant> {}, [&] <class T> (T* value) {
           value->~T();
         });
       }
     }
 
-    uint8_t operator [](size_t offset) const noexcept {
+    uint8_t operator [](size_type offset) const noexcept {
       return data[offset];
     }
 
@@ -834,7 +941,18 @@ namespace varvec::storage {
       return data.get();
     }
 
-    void incr_offset(size_t count) noexcept {
+    void set_offset(size_type idx, size_type val) noexcept {
+      // Potentially reallocate our offset storage if its runtime
+      // type can't represent the offset value we need to store.
+      if (!offsets->can_handle(val)) offsets = offsets->realloc_for(val);
+      offsets->set(idx, val);
+    }
+
+    size_type get_offset(size_type idx) const noexcept {
+      return offsets->get(idx);
+    }
+
+    void incr_offset(size_type count) noexcept {
       offset += count;
     }
 
@@ -842,12 +960,12 @@ namespace varvec::storage {
       operator delete[] (ptr, std::align_val_t(max_alignment));
     }
 
-    uint8_t* resize(size_t scale) {
+    uint8_t* resize(size_type scale) {
       // Update
       data = realloc(bytes * scale);
       bytes *= scale;
       types.resize(count * scale);
-      offsets.resize(offsets.size() * scale);
+      offsets->resize(count * scale);
       return get_data() + offset;
     }
 
@@ -858,22 +976,22 @@ namespace varvec::storage {
       // Update all the book keeping
       bytes = offset;
       types.resize(count);
-      offsets.shrink_to_fit();
+      offsets->resize(count);
     }
 
-    size_t buffer_size() const noexcept {
+    size_type buffer_size() const noexcept {
       return bytes;
     }
 
-    size_t size() const noexcept {
-      return buffer_size() + (sizeof(uint8_t) * types.size()) + (sizeof(size_type) * offsets.size());
+    size_type size() const noexcept {
+      return buffer_size() + (sizeof(uint8_t) * types.size()) + offsets->used_bytes();
     }
 
-    size_t max_members() const noexcept {
-      return offsets.capacity();
+    size_type max_members() const noexcept {
+      return offsets->capacity();
     }
 
-    bool has_space(size_t more) const noexcept {
+    bool has_space(size_type more) const noexcept {
       return count < max_members() && offset + more < bytes;
     }
 
@@ -887,20 +1005,19 @@ namespace varvec::storage {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         memcpy(newdata.get(), data.get(), bytes);
       } else if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
-        move_storage<Variant>(count, types, offsets, newdata.get(), data.get());
+        move_storage<Variant>(count, types, *offsets, newdata.get(), data.get());
       } else {
-        copy_storage<Variant>(count, types, offsets, newdata.get(), data.get());
+        copy_storage<Variant>(count, types, *offsets, newdata.get(), data.get());
       }
       return newdata;
     }
 
-    // FIXME: Needs reconsideration. Uses too much memory.
     size_type bytes;
     size_type count;
     size_type offset;
 
     type_storage types;
-    std::vector<size_type> offsets;
+    std::unique_ptr<virtual_offset_storage> offsets;
     std::unique_ptr<uint8_t[], deleter> data;
 
   };
@@ -1104,7 +1221,7 @@ namespace varvec {
       value_type operator [](size_type index) const noexcept(nothrow_value_copyable) {
         assert(index < size());
         uint8_t const type = impl.types[index];
-        auto const offset = impl.offsets[index];
+        auto const offset = impl.get_offset(index);
         auto* const curr_ptr = impl.get_data() + offset;
         return storage::get_aligned_ptr_for(type, curr_ptr, meta::identity<logical_type> {},
             [] <class T> (T const* ptr) noexcept(nothrow_value_copyable) -> value_type {
@@ -1187,14 +1304,14 @@ namespace varvec {
           new(data_ptr) stored_type(std::forward<ValueType>(val));
         }
         impl.types[curr_count] = meta::index_of_v<stored_type, Types...>;
-        impl.offsets[curr_count] = impl.offset;
+        impl.set_offset(curr_count, impl.offset);
         impl.incr_offset(sizeof(stored_type));
       }
 
       void pop_back() {
         auto const curr_idx = --impl.count;
         uint8_t const type = impl.types[curr_idx];
-        auto const offset = impl.offsets[curr_idx];
+        auto const offset = impl.get_offset(curr_idx);
         auto* const curr_ptr = impl.get_data() + offset;
         storage::get_aligned_ptr_for(type, curr_ptr,
             meta::identity<logical_type> {}, [] <class T> (T* ptr) noexcept {
@@ -1231,7 +1348,7 @@ namespace varvec {
         constexpr bool is_noexcept = noexcept(nothrow_exhaustive_visitor_v<Func>);
 
         uint8_t const type = impl.types[index];
-        auto const offset = impl.offsets[index];
+        auto const offset = impl.get_offset(index);
         auto* const curr_ptr = impl.get_data() + offset;
         storage::get_aligned_ptr_for(type, curr_ptr,
             meta::identity<logical_type> {}, [&] <class T> (T* ptr) noexcept(is_noexcept) {
