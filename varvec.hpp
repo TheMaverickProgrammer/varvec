@@ -48,6 +48,14 @@ namespace varvec::meta {
   }
 
   template <template <class...> class Container, class... Ts>
+  constexpr auto mean_size_of(identity<Container<Ts...>>) noexcept {
+    size_t total = 0;
+    std::array<size_t, sizeof...(Ts)> sizes {sizeof(Ts)...};
+    for (auto size : sizes) total += size;
+    return total / sizes.size();
+  }
+
+  template <template <class...> class Container, class... Ts>
   constexpr auto num_types_in(identity<Container<Ts...>>) noexcept {
     return sizeof...(Ts);
   }
@@ -215,14 +223,16 @@ namespace varvec::meta {
 namespace varvec::storage {
 
   // The dynamic storage implementation uses aligned-new to allocate memory,
-  // which means it has to be paired with aligned-delete.
+  // which means it has to be paired with aligned-delete, which means I can't
+  // use std::default_delete (the default).
+  //
   // If I do the deleter via a function pointer it'll double the size of the
   // unique_ptr, but as an empty class it becomes eligible for EBO, and so
   // it'll be pointer size again. Every byte counts
   template <class T, std::align_val_t alignment>
   struct aligned_deleter {
     void operator ()(T* ptr) const noexcept {
-      operator delete[] (ptr, alignment);
+      operator delete[](ptr, alignment);
     }
   };
 
@@ -251,22 +261,30 @@ namespace varvec::storage {
   };
 
   struct dynamic_bitvec_storage {
-    explicit dynamic_bitvec_storage(size_t bytes) :
-      storage(bytes)
+    explicit dynamic_bitvec_storage(size_t num_bytes) :
+      bytes(num_bytes),
+      storage(std::make_unique<uint8_t[]>(bytes))
     {}
-    dynamic_bitvec_storage(dynamic_bitvec_storage const&) = default;
+    dynamic_bitvec_storage(dynamic_bitvec_storage const& other) : bytes(other.bytes), storage(nullptr) {
+      storage = std::make_unique<uint8_t[]>(bytes);
+      memcpy(storage.get(), other.storage.get(), bytes);
+    }
     dynamic_bitvec_storage(dynamic_bitvec_storage&&) = default;
     ~dynamic_bitvec_storage() = default;
 
     void resize(size_t new_size) {
-      storage.resize(new_size);
+      auto tmp = std::make_unique<uint8_t[]>(new_size);
+      memcpy(tmp.get(), storage.get(), size());
+      bytes = new_size;
+      storage = std::move(tmp);
     }
 
     size_t size() const noexcept {
-      return storage.size();
+      return bytes;
     }
 
-    std::vector<uint8_t> storage;
+    size_t bytes;
+    std::unique_ptr<uint8_t[]> storage;
   };
 
   template <size_t bits_per_entry, class StorageBase>
@@ -363,13 +381,17 @@ namespace varvec::storage {
 
     static constexpr size_t init_size = 8;
 
-    dynamic_bitvec() : parent_class(init_size) {}
-    explicit dynamic_bitvec(size_t bytes) : parent_class(bytes) {}
+    dynamic_bitvec() : parent_class((init_size * bits_per_entry) / CHAR_BIT) {}
+    explicit dynamic_bitvec(size_t members) : parent_class((members * bits_per_entry) / CHAR_BIT) {}
     dynamic_bitvec(dynamic_bitvec const&) = default;
     dynamic_bitvec(dynamic_bitvec&&) = default;
     ~dynamic_bitvec() = default;
 
     using parent_class::operator [];
+
+    void resize(size_t members) {
+      parent_class::resize((members * bits_per_entry) / CHAR_BIT);
+    }
 
   };
 
@@ -534,6 +556,7 @@ namespace varvec::storage {
   template <class Variant, size_t bytes, size_t memcount>
   struct static_storage_base {
 
+    using size_type = size_t;
     using variant_type = Variant;
 
     // These compute the template parameters for the packed_bitvec used as type storage.
@@ -552,9 +575,9 @@ namespace varvec::storage {
 
     // This is a fallback case for the extraordinarily unlikely event that the user
     // chooses to parameterize their vector with more than 256 types, in which case
-    // packed_bitvec can't handle it.
+    // static_bitvec can't handle it.
     using unpacked_type_storage = std::array<
-      meta::smallest_type_for_t<std::max({num_types})>(),
+      meta::smallest_type_for_t<std::max({num_types})>,
       memcount
     >;
 
@@ -574,8 +597,8 @@ namespace varvec::storage {
 
     static_storage_base() noexcept : count(0), offset(0), types(), offsets({0}), data({0}) {}
 
-    explicit static_storage_base(size_t start_bytes) {
-      if (start_bytes > bytes) {
+    explicit static_storage_base(size_type members) {
+      if (members > memcount) {
         throw std::bad_alloc();
       }
     }
@@ -662,6 +685,10 @@ namespace varvec::storage {
       return sizeof(types) + sizeof(offsets) + sizeof(data);
     }
 
+    constexpr size_t max_members() const noexcept {
+      return memcount;
+    }
+
     bool has_space(size_t more) const noexcept {
       if (count < memcount) return offset + more <= bytes;
       else return false;
@@ -710,17 +737,47 @@ namespace varvec::storage {
     using variant_type = Variant;
 
     static constexpr auto start_members = 8;
-    static constexpr auto start_size = start_members * meta::max_size_of(meta::identity<variant_type> {});
+    static constexpr auto start_size = start_members * meta::mean_size_of(meta::identity<variant_type> {});
     static constexpr auto max_alignment = meta::max_alignment_of(meta::identity<variant_type> {});
 
+    static constexpr auto num_types = meta::num_types_in(meta::identity<Variant> {});
+    static constexpr auto type_bits = meta::rounded_bits_for<num_types - 1>();
+
     static constexpr bool has_nothrow_resize = false;
+
+    // This is a fallback case for the extraordinarily unlikely event that the user
+    // chooses to parameterize their vector with more than 256 types, in which case
+    // dynamic_bitvec can't handle it.
+    using unpacked_type_storage = std::vector<
+      meta::smallest_type_for_t<std::max({num_types})>
+    >;
+
+    // Choose to use a bitpacked representation for our type storage if we can
+    // Otherwise fall back on std::vector.
+    using type_storage = std::conditional_t<
+      type_bits <= 8,
+      dynamic_bitvec<type_bits>,
+      unpacked_type_storage
+    >;
 
     using deleter = aligned_deleter<uint8_t, std::align_val_t(max_alignment)>;
 
     dynamic_storage() :
+      bytes(start_size),
+      count(0),
+      offset(0),
       types(start_members),
       offsets(start_members),
-      data(new (std::align_val_t(max_alignment)) uint8_t[start_size])
+      data(new(std::align_val_t(max_alignment)) uint8_t[bytes])
+    {}
+
+    explicit dynamic_storage(size_type members) :
+      bytes(members * meta::mean_size_of(meta::identity<variant_type> {})),
+      count(0),
+      offset(0),
+      types(members),
+      offsets(members),
+      data(new(std::align_val_t(max_alignment)) uint8_t[bytes])
     {}
 
     dynamic_storage(dynamic_storage const& other)
@@ -786,27 +843,22 @@ namespace varvec::storage {
     }
 
     uint8_t* resize(size_t scale) {
-      // Align some storage
-      size_t const newsize = bytes * scale;
-      std::unique_ptr<uint8_t[], deleter> newdata {
-        new (std::align_val_t(max_alignment)) uint8_t[newsize]
-      };
-
-      // Strong exception guarantee. Don't throw from moves
-      if constexpr (std::is_trivially_copyable_v<Variant>) {
-        memcpy(newdata.get(), data.get(), bytes);
-      } else if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
-        move_storage<Variant>(count, types, offsets, newdata.get(), data.get());
-      } else {
-        copy_storage<Variant>(count, types, offsets, newdata.get(), data.get());
-      }
-
       // Update
-      data = std::move(newdata);
-      bytes = newsize;
-      types.resize(types.size() * scale);
-      offsets.resize(types.size() * scale);
+      data = realloc(bytes * scale);
+      bytes *= scale;
+      types.resize(count * scale);
+      offsets.resize(offsets.size() * scale);
       return get_data() + offset;
+    }
+
+    void shrink_to_fit() {
+      // Reallocate the storage region
+      data = realloc(offset);
+
+      // Update all the book keeping
+      bytes = offset;
+      types.resize(count);
+      offsets.shrink_to_fit();
     }
 
     size_t buffer_size() const noexcept {
@@ -817,15 +869,37 @@ namespace varvec::storage {
       return buffer_size() + (sizeof(uint8_t) * types.size()) + (sizeof(size_type) * offsets.size());
     }
 
+    size_t max_members() const noexcept {
+      return offsets.capacity();
+    }
+
     bool has_space(size_t more) const noexcept {
-      return offset + more < bytes;
+      return count < max_members() && offset + more < bytes;
+    }
+
+    std::unique_ptr<uint8_t[], deleter> realloc(size_type new_size) {
+      // Align some storage.
+      std::unique_ptr<uint8_t[], deleter> newdata {
+        new(std::align_val_t(max_alignment)) uint8_t[new_size]
+      };
+
+      // Strong exception guarantee. Don't throw from moves
+      if constexpr (std::is_trivially_copyable_v<Variant>) {
+        memcpy(newdata.get(), data.get(), bytes);
+      } else if constexpr (std::is_nothrow_move_constructible_v<Variant>) {
+        move_storage<Variant>(count, types, offsets, newdata.get(), data.get());
+      } else {
+        copy_storage<Variant>(count, types, offsets, newdata.get(), data.get());
+      }
+      return newdata;
     }
 
     // FIXME: Needs reconsideration. Uses too much memory.
-    size_type bytes {start_size};
-    size_type count {0};
-    size_type offset {0};
-    std::vector<uint8_t> types;
+    size_type bytes;
+    size_type count;
+    size_type offset;
+
+    type_storage types;
     std::vector<size_type> offsets;
     std::unique_ptr<uint8_t[], deleter> data;
 
@@ -1007,6 +1081,10 @@ namespace varvec {
         noexcept(std::is_nothrow_constructible_v<storage_type>)
       {}
 
+      explicit basic_variable_vector(size_type start_members) :
+        impl(start_members)
+      {}
+
       basic_variable_vector(basic_variable_vector const& other)
         noexcept(nothrow_logical_copyable)
         requires (std::copyable<Types> && ...)
@@ -1024,11 +1102,12 @@ namespace varvec {
 
       // Subscript operator. Creates a temporary variant to return.
       value_type operator [](size_type index) const noexcept(nothrow_value_copyable) {
+        assert(index < size());
         uint8_t const type = impl.types[index];
         auto const offset = impl.offsets[index];
         auto* const curr_ptr = impl.get_data() + offset;
-        return storage::get_aligned_ptr_for(type, curr_ptr,
-            meta::identity<logical_type> {}, [] <class T> (T const* ptr) -> value_type {
+        return storage::get_aligned_ptr_for(type, curr_ptr, meta::identity<logical_type> {},
+            [] <class T> (T const* ptr) noexcept(nothrow_value_copyable) -> value_type {
           if constexpr (std::copyable<T>) return *ptr;
           else return ptr;
         });
@@ -1118,7 +1197,7 @@ namespace varvec {
         auto const offset = impl.offsets[curr_idx];
         auto* const curr_ptr = impl.get_data() + offset;
         storage::get_aligned_ptr_for(type, curr_ptr,
-            meta::identity<logical_type> {}, [] <class T> (T* ptr) {
+            meta::identity<logical_type> {}, [] <class T> (T* ptr) noexcept {
           ptr->~T();
         });
       }
@@ -1359,6 +1438,10 @@ namespace varvec {
 
       size_type size() const noexcept {
         return impl.count;
+      }
+
+      size_type capacity() const noexcept {
+        return impl.max_members();
       }
 
       bool empty() const noexcept {

@@ -328,6 +328,17 @@ TEST_CASE("mutation", "varvec tests") {
   asserts(varvec::meta::identity<dynamic_movable_vector> {});
 }
 
+TEST_CASE("resize", "varvec tests") {
+  dynamic_copyable_vector vec(4);
+  REQUIRE(vec.capacity() == 4);
+
+  for (int i = 0; i < 5; i++) {
+    vec.push_back(i);
+  }
+  REQUIRE(vec.size() == 5);
+  REQUIRE(vec.capacity() == 8);
+}
+
 #ifdef VARVEC_BENCHMARK
 TEST_CASE("performance", "varvec benchmarks") {
   copyable_vector vec;
