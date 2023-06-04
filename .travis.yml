@@ -15,10 +15,10 @@ before_install:
 script:
   - mkdir build
   - cd build
-  - CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 cmake .. -Dcoverage=ON
+  - CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 cmake .. -Dcoverage=ON -DCMAKE_BUILD_TYPE=Debug
   - make
   - ctest --verbose
   - cd ..
 
 after_success:
-  - coveralls -r . -b build/ -i . --gcov-options '\-lp'
+  - coveralls -r . -b build/ -i . -E '.*[Cc]atch.*' -E '.*CMakeFiles.*' -E 'tests' --gcov-options '\-lp'
