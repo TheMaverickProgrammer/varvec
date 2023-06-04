@@ -214,6 +214,18 @@ namespace varvec::meta {
 
 namespace varvec::storage {
 
+  // The dynamic storage implementation uses aligned-new to allocate memory,
+  // which means it has to be paired with aligned-delete.
+  // If I do the deleter via a function pointer it'll double the size of the
+  // unique_ptr, but as an empty class it becomes eligible for EBO, and so
+  // it'll be pointer size again. Every byte counts
+  template <class T, std::align_val_t alignment>
+  struct aligned_deleter {
+    void operator ()(T* ptr) const noexcept {
+      operator delete[] (ptr, alignment);
+    }
+  };
+
   template <size_t total_bytes>
   struct static_bitvec_storage {
     static_bitvec_storage() noexcept : storage({0}) {}
@@ -703,10 +715,12 @@ namespace varvec::storage {
 
     static constexpr bool has_nothrow_resize = false;
 
+    using deleter = aligned_deleter<uint8_t, std::align_val_t(max_alignment)>;
+
     dynamic_storage() :
       types(start_members),
       offsets(start_members),
-      data(new (std::align_val_t(max_alignment)) uint8_t[start_size], aligned_delete)
+      data(new (std::align_val_t(max_alignment)) uint8_t[start_size])
     {}
 
     dynamic_storage(dynamic_storage const& other)
@@ -717,7 +731,7 @@ namespace varvec::storage {
       offset(other.offset),
       types(other.types),
       offsets(other.offsets),
-      data(new (std::align_val_t(max_alignment)) uint8_t[bytes], aligned_delete)
+      data(new (std::align_val_t(max_alignment)) uint8_t[bytes])
     {
       if constexpr (std::is_trivially_copyable_v<Variant>) {
         memcpy(get_data(), other.get_data(), bytes);
@@ -774,8 +788,8 @@ namespace varvec::storage {
     uint8_t* resize(size_t scale) {
       // Align some storage
       size_t const newsize = bytes * scale;
-      std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> newdata {
-        new (std::align_val_t(max_alignment)) uint8_t[newsize], aligned_delete
+      std::unique_ptr<uint8_t[], deleter> newdata {
+        new (std::align_val_t(max_alignment)) uint8_t[newsize]
       };
 
       // Strong exception guarantee. Don't throw from moves
@@ -813,7 +827,7 @@ namespace varvec::storage {
     size_type offset {0};
     std::vector<uint8_t> types;
     std::vector<size_type> offsets;
-    std::unique_ptr<uint8_t[], void (*) (uint8_t*) noexcept> data;
+    std::unique_ptr<uint8_t[], deleter> data;
 
   };
 
@@ -1262,7 +1276,7 @@ namespace varvec {
         T retval {};
 
         // FIXME: This could be done more efficiently. We're searching for a type
-        // match 
+        // match when it should be possible to compute the index directly
         visit(index, [&] <class U> (U const& val) noexcept {
           if constexpr (std::is_same_v<U, T>) {
             retval = val;
@@ -1451,8 +1465,9 @@ namespace varvec {
     Types...
   >;
 
-  // Feels like this should really be in varvec::meta, but it's so useful for
-  // visitation that I want it to be easier to type.
+  // XXX: Feels like this should really be in varvec::meta, but it's so useful for
+  // visitation that I want it to be easier to type, and it can't be a type alias
+  // here because CTAD doesn't work for type aliases...
   template <class... Funcs>
   struct overload : Funcs... {
     using Funcs::operator ()...;
