@@ -1454,15 +1454,10 @@ namespace varvec {
       template <class T>
       requires nontrivial_get_reqs_v<T>
       T& get(size_type index) & noexcept {
-        // XXX: Will crash below if you call this on the wrong type. The cost of noexcept.
+        // Trust the user and grab it.
+        // Obviously this is UB if you call it with the wrong type
         // If you want exceptions, call get_at.
-        T* ptr = nullptr;
-        visit(index, [&] <class U> (U& val) noexcept {
-          if constexpr (std::is_same_v<U, T>) {
-            ptr = &val;
-          }
-        });
-        return *ptr;
+        return *reinterpret_cast<T*>(impl.get_data() + impl.get_offset(index));
       }
 
       template <class T>
@@ -1498,18 +1493,20 @@ namespace varvec {
       template <class T>
       requires trivial_get_reqs_v<T>
       T get(size_type index) const noexcept {
-        // XXX: Will return value-initialized T if the type is mismatched.
-        // If you want exceptions call get_at.
-        T retval {};
+        // Trust the user and grab it.
+        // Obviously this is UB if you call it with the wrong type
+        // If you want exceptions, call get_at.
+        auto* const data_ptr = reinterpret_cast<T const*>(impl.get_data() + impl.get_offset(index));
 
-        // FIXME: This could be done more efficiently. We're searching for a type
-        // match when it should be possible to compute the index directly
-        visit(index, [&] <class U> (U const& val) noexcept {
-          if constexpr (std::is_same_v<U, T>) {
-            retval = val;
-          }
-        });
-        return retval;
+        // Since this overload is only for trivial types, the address
+        // could be misaligned, and so we copy into a temporary if so.
+        if (storage::aligned_for_type<T>(data_ptr)) {
+          return *data_ptr;
+        } else {
+          T retval;
+          memcpy(&retval, impl.get_data() + impl.get_offset(index), sizeof(T));
+          return retval;
+        }
       }
 
       template <class T>
@@ -1521,16 +1518,12 @@ namespace varvec {
       template <class T>
       requires nontrivial_get_reqs_v<T>
       T& get_at(size_type index) & {
-        T* ptr = nullptr;
-        visit_at(index, [&] <class U> (U& val) {
-          if constexpr (std::is_same_v<U, T>) {
-            ptr = &val;
-          } else {
-            // FIXME: Is this the right move? Should I create an internal type?
-            throw std::bad_cast();
-          }
-        });
-        return *ptr;
+        // Bounds and type checks.
+        bounds_check(index);
+        if (impl.types[index] != meta::index_of_v<T, Types...>) {
+          throw std::bad_cast();
+        }
+        return get<T>(index);
       }
 
       template <class T>
@@ -1566,16 +1559,12 @@ namespace varvec {
       template <class T>
       requires trivial_get_reqs_v<T>
       T get_at(size_type index) const {
-        T retval;
-        visit_at(index, [&] <class U> (U const& val) {
-          if constexpr (std::is_same_v<U, T>) {
-            retval = val;
-          } else {
-            // FIXME: Is this the right move? Should I create an internal type?
-            throw std::bad_cast();
-          }
-        });
-        return retval;
+        // Bounds and type checks.
+        bounds_check(index);
+        if (impl.types[index] != meta::index_of_v<T, Types...>) {
+          throw std::bad_cast();
+        }
+        return get<T>(index);
       }
 
       template <class T>
