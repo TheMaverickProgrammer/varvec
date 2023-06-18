@@ -26,7 +26,7 @@ static_assert(
   std::is_trivially_destructible_v<trivial_vector>
 );
 
-using copyable_vector = varvec::static_vector<128, 4, bool, int, float, std::string>;
+using copyable_vector = varvec::static_vector<128, 8, bool, int, float, std::string>;
 
 static_assert(
   !std::is_trivially_destructible_v<copyable_vector>
@@ -45,7 +45,7 @@ static_assert(
   !noexcept(std::declval<copyable_vector>().visit(0, [] (auto&) {}))
 );
 
-using movable_vector = varvec::static_vector<128, 4, bool, int, float, std::string, std::unique_ptr<double>>;
+using movable_vector = varvec::static_vector<128, 8, bool, int, float, std::string, std::unique_ptr<double>>;
 
 static_assert(
   !std::is_trivially_destructible_v<movable_vector>
@@ -366,6 +366,34 @@ TEST_CASE("resize", "varvec tests") {
   for (int i = 5; i < 10; i++) {
     REQUIRE(vec[i] == value {big_data {}});
   }
+}
+
+TEST_CASE("insert", "varvec tests") {
+  auto asserts = [] <class V> (varvec::meta::identity<V>) {
+    using val = typename V::value_type;
+
+    V vec;
+    vec.push_back("a long enough string that the small string optimization won't apply");
+    vec.push_back("a long enough string that the small string optimization won't apply");
+    vec.insert(0, true);
+    vec.insert(1, false);
+    vec.push_back("a long enough string that the small string optimization won't apply");
+    vec.insert(3, 3.5f);
+    vec.insert(6, "a final value");
+
+    REQUIRE(vec.size() == 7);
+    REQUIRE(vec[0] == val {true});
+    REQUIRE(vec[1] == val {false});
+    REQUIRE(vec[2] == val {"a long enough string that the small string optimization won't apply"});
+    REQUIRE(vec[3] == val {3.5f});
+    REQUIRE(vec[4] == val {"a long enough string that the small string optimization won't apply"});
+    REQUIRE(vec[5] == val {"a long enough string that the small string optimization won't apply"});
+    REQUIRE(vec[6] == val {"a final value"});
+  };
+  asserts(varvec::meta::identity<copyable_vector> {});
+  asserts(varvec::meta::identity<movable_vector> {});
+  asserts(varvec::meta::identity<dynamic_copyable_vector> {});
+  asserts(varvec::meta::identity<dynamic_movable_vector> {});
 }
 
 #ifdef VARVEC_BENCHMARK
