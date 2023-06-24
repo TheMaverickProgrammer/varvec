@@ -368,7 +368,7 @@ TEST_CASE("resize", "varvec tests") {
   }
 }
 
-TEST_CASE("insert", "varvec tests") {
+TEST_CASE("insert and erase", "varvec tests") {
   auto asserts = [] <class V> (varvec::meta::identity<V>) {
     using val = typename V::value_type;
 
@@ -389,6 +389,25 @@ TEST_CASE("insert", "varvec tests") {
     REQUIRE(vec[4] == val {"a long enough string that the small string optimization won't apply"});
     REQUIRE(vec[5] == val {"a long enough string that the small string optimization won't apply"});
     REQUIRE(vec[6] == val {"a final value"});
+
+    auto it = vec.erase(0);
+    it = vec.erase(it);
+    it = vec.erase(it);
+    REQUIRE(vec.size() == 4);
+    REQUIRE(vec[0] == val {3.5f});
+    REQUIRE(vec[1] == val {"a long enough string that the small string optimization won't apply"});
+    REQUIRE(vec[2] == val {"a long enough string that the small string optimization won't apply"});
+    REQUIRE(vec[3] == val {"a final value"});
+
+    it = vec.erase(it);
+    it = vec.erase(it);
+    it = vec.erase(it);
+    REQUIRE(vec.size() == 1);
+    REQUIRE(vec[0] == val {"a final value"});
+
+    it = vec.erase(it);
+    REQUIRE(vec.size() == 0);
+    REQUIRE(it == vec.end());
   };
   asserts(varvec::meta::identity<copyable_vector> {});
   asserts(varvec::meta::identity<movable_vector> {});

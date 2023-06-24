@@ -1474,14 +1474,7 @@ namespace varvec {
       }
 
       void pop_back() {
-        auto const curr_idx = --impl.count;
-        uint8_t const type = impl.types[curr_idx];
-        auto const offset = impl.get_offset(curr_idx);
-        auto* const curr_ptr = impl.get_data() + offset;
-        storage::get_aligned_ptr_for(type, curr_ptr,
-            meta::identity<logical_type> {}, [] <class T> (T* ptr) noexcept {
-          ptr->~T();
-        });
+        destroy_at(--impl.count);
       }
 
       value_type front() const noexcept(nothrow_value_copyable) {
@@ -1770,6 +1763,19 @@ namespace varvec {
         insert(it.idx, std::forward<ValueType>(val));
       }
 
+      iterator erase(size_type idx) noexcept requires nothrow_logical_movable {
+        assert(idx < size());
+
+        // Knock out the requested index and shift everything backwards
+        impl.offset = walk_forward_move_backward(idx);
+        --impl.count;
+        return begin() + idx;
+      }
+
+      iterator erase(iterator it) noexcept requires nothrow_logical_movable {
+        return erase(it.idx);
+      }
+
       size_type size() const noexcept {
         return impl.count;
       }
@@ -1904,24 +1910,8 @@ namespace varvec {
           // Perform the move, conditional on if the type is trivially copyable (needs alignment)
           if (move_src != move_dst) {
             if (curr.needs_align) {
-              storage::get_typed_ptr_for(type_index, move_src,
-                  meta::identity<logical_type> {}, [&] <class T> (T* srcptr) noexcept {
-                static_assert(!std::is_const_v<T>);
-                T* destptr = reinterpret_cast<T*>(move_dst);
-
-                // FIXME: Research if this is even legal
-                // XXX: Temporary may be necessary because srcptr and dstptr may overlap.
-                // Address will always be well aligned, but we may be moving an object
-                // overtop of itself in the storage, so we have to be a bit careful...
-                auto srcintptr = reinterpret_cast<std::uintptr_t>(srcptr);
-                auto destintptr = reinterpret_cast<std::uintptr_t>(destptr);
-                if (destintptr - srcintptr < curr.size_of) {
-                  T tmp(std::move(*srcptr));
-                  new(destptr) T(std::move(tmp));
-                } else {
-                  new(destptr) T(std::move(*srcptr));
-                }
-              });
+              // Handles carefully calling a move constructor on pointers that may overlap.
+              move_overlapping_pointers(curr, move_src, move_dst, type_index);
             } else {
               // Regions can overlap, so we can't memcpy
               memmove(move_dst, move_src, curr.size_of);
@@ -1948,6 +1938,99 @@ namespace varvec {
             move_point = next_dst - impl.get_data();
           }
         } while (curr_idx != insert_index);
+      }
+
+      // FIXME: Handle noexcept
+      size_type walk_forward_move_backward(size_type erase_point) noexcept {
+        // Walk forward and shift each object back one index
+        auto curr_idx = erase_point;
+        auto curr_offset = impl.get_offset(curr_idx);
+        auto& align_info = storage::alignment_map_for_v<value_type>;
+        while (true) {
+          // Destroy the current index and break if it's the final element.
+          destroy_at(curr_idx);
+          if (curr_idx == size() - 1) break;
+
+          // Get type and alignment info for the index we're moving
+          uint8_t const type_index = impl.types[curr_idx + 1];
+          auto const& curr = align_info[type_index];
+
+          // Compute the new storage location
+          auto* move_dst = impl.get_data() + curr_offset;
+          if (curr.needs_align) {
+            move_dst = storage::realign_for_type_index<value_type>(move_dst, type_index);
+            curr_offset = move_dst - impl.get_data();
+          }
+
+          // Compute the current storage location
+          auto const src_offset = impl.get_offset(curr_idx + 1);
+          auto* move_src = impl.get_data() + src_offset;
+
+          // Sanity checks
+          auto const well_aligned =
+              storage::aligned_for_type_index<value_type>(move_src, type_index)
+              &&
+              storage::aligned_for_type_index<value_type>(move_dst, type_index);
+          assert(well_aligned || !curr.needs_align);
+
+          // Perform the move, conditional on if the type is trivially copyable (needs alignment)
+          if (move_src != move_dst) {
+            if (curr.needs_align) {
+              move_overlapping_pointers(curr, move_src, move_dst, type_index);
+            } else {
+              memmove(move_dst, move_src, curr.size_of);
+            }
+          }
+
+          // Update bookkeeping
+          impl.types[curr_idx] = type_index;
+          impl.set_offset(curr_idx, move_dst - impl.get_data());
+          ++curr_idx;
+          curr_offset += curr.size_of;
+        }
+        return curr_offset;
+      }
+
+      void move_overlapping_pointers(auto const& align,
+          uint8_t* move_src, uint8_t* move_dst, uint8_t type_index) noexcept
+        requires nothrow_logical_movable
+      {
+        storage::get_typed_ptr_for(type_index, move_src,
+            meta::identity<logical_type> {}, [&] <class T> (T* srcptr) noexcept {
+          static_assert(!std::is_const_v<T>);
+
+          // XXX: Have to be very careful here.
+          // The move_src and move_dst can potentially overlap in memory, and if they do
+          // we have to move through an intermediate object to prevent accidentally corrupting
+          // the object while we move from it.
+          // The check is formulated as it is so it'll work regardless of which is first in memory.
+          // Expecting to be able to perform distance calculations like this might still be UB,
+          // but it seems to work
+          auto srcintptr = reinterpret_cast<std::uintptr_t>(srcptr);
+          auto destintptr = reinterpret_cast<std::uintptr_t>(move_dst);
+          if (std::max(srcintptr, destintptr) <
+              std::min(srcintptr + align.size_of, destintptr + align.size_of)) {
+            T tmp(std::move(*srcptr));
+            srcptr->~T();
+
+            // We call placement-new here on an untyped pointer.
+            // The idea is hopefully encourage the compiler to realize that it might alias
+            new(move_dst) T(std::move(tmp));
+          } else {
+            new(move_dst) T(std::move(*srcptr));
+            srcptr->~T();
+          }
+        });
+      }
+
+      void destroy_at(size_type index) noexcept {
+        uint8_t const type = impl.types[index];
+        auto const offset = impl.get_offset(index);
+        auto* const curr_ptr = impl.get_data() + offset;
+        storage::get_aligned_ptr_for(type, curr_ptr,
+            meta::identity<logical_type> {}, [] <class T> (T* ptr) noexcept {
+          ptr->~T();
+        });
       }
 
       void bounds_check(size_t index) const {
