@@ -456,8 +456,9 @@ namespace varvec::storage {
       assert(byte < this->size());
       auto data = this->storage[byte];
 
-      // FIXME: I feel like this shouldn't require so many complements...
-      this->storage[byte] = (data & ~(~(~0U << bits_per_entry) << bit)) | (val << bit);
+      // Lol ChatGPT gave me this, it's better than what I had before
+      uint8_t mask = ((1 << bits_per_entry) - 1) << bit;
+      this->storage[byte] = (data & ~mask) | ((val << bit) & mask);
     }
 
     size_t max_members() const noexcept {
@@ -465,9 +466,10 @@ namespace varvec::storage {
     }
 
     std::tuple<size_t, size_t> calculate_location(size_t index) const noexcept {
-      // FIXME: Any other options? Division is slow
+      // Divide by 8 to get the byte index, then mod by 8 to get the bit index.
+      // Implemented as a shift and a mask for speed
       auto bit_idx = index * bits_per_entry;
-      return {bit_idx / CHAR_BIT, bit_idx % CHAR_BIT};
+      return {bit_idx >> 3, bit_idx & 7};
     }
 
   };
@@ -913,14 +915,14 @@ namespace varvec::storage {
       auto backup {*this};
       this->~static_storage_base();
       try {
-        // First try to construct ourselves as a copy of the incoming object.
+        // First try to construct ourselves off of the incoming object.
         new(this) static_storage_base(std::forward<Storage>(other));
       } catch (...) {
         try {
-          // Copy threw. Unfortunate. Try to restore ourselves to our backup
+          // First pass threw. Unfortunate. Try to restore ourselves to our backup
           new(this) static_storage_base(std::move(backup));
         } catch (...) {
-          // Restoration ALSO threw, double unfortunate.
+          // Restoration ALSO threw, bad news.
           // Final escape clause is to reset ourselves to an empty container (sucks, but won't throw)
           // to ensure that we don't allow a destroyed object to escape into the rest of the program.
           new(this) static_storage_base();
@@ -1940,7 +1942,6 @@ namespace varvec {
         } while (curr_idx != insert_index);
       }
 
-      // FIXME: Handle noexcept
       size_type walk_forward_move_backward(size_type erase_point) noexcept {
         // Walk forward and shift each object back one index
         auto curr_idx = erase_point;
@@ -1985,8 +1986,9 @@ namespace varvec {
           // Update bookkeeping
           impl.types[curr_idx] = type_index;
           impl.set_offset(curr_idx, move_dst - impl.get_data());
-          ++curr_idx;
+
           curr_offset += curr.size_of;
+          ++curr_idx;
         }
         return curr_offset;
       }
@@ -2000,14 +2002,14 @@ namespace varvec {
           static_assert(!std::is_const_v<T>);
 
           // XXX: Have to be very careful here.
+          //
           // The move_src and move_dst can potentially overlap in memory, and if they do
           // we have to move through an intermediate object to prevent accidentally corrupting
           // the object while we move from it.
+          //
           // The check is formulated as it is so it'll work regardless of which is first in memory.
-          // Expecting to be able to perform distance calculations like this might still be UB,
-          // but it seems to work
-          auto srcintptr = reinterpret_cast<std::uintptr_t>(srcptr);
-          auto destintptr = reinterpret_cast<std::uintptr_t>(move_dst);
+          auto const srcintptr = reinterpret_cast<std::uintptr_t>(srcptr);
+          auto const destintptr = reinterpret_cast<std::uintptr_t>(move_dst);
           if (std::max(srcintptr, destintptr) <
               std::min(srcintptr + align.size_of, destintptr + align.size_of)) {
             T tmp(std::move(*srcptr));

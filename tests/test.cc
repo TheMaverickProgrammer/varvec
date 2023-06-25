@@ -408,6 +408,7 @@ TEST_CASE("insert and erase", "varvec tests") {
     it = vec.erase(it);
     REQUIRE(vec.size() == 0);
     REQUIRE(it == vec.end());
+    for (auto v : vec) REQUIRE(false);
   };
   asserts(varvec::meta::identity<copyable_vector> {});
   asserts(varvec::meta::identity<movable_vector> {});
